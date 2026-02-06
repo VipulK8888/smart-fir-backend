@@ -1,6 +1,7 @@
 flask
-pymongo
 pandas
 openpyxl
 reportlab
+pymongo
+dnspython
 gunicorn
