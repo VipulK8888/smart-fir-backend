@@ -18,7 +18,7 @@ app = Flask(__name__)
 # 🔗 MongoDB CONNECTION
 # --------------------------------------------------
 
-MONGO_URI = "mongodb+srv://vipulkumawat989_db_user:QWer12@*@cluster0.eowfn9t.mongodb.net/smart_fir_db?appName=Cluster0"
+MONGO_URI = "mongodb+srv://vipulkumawat989_db_user:QWer12@*@cluster0.eowfn9t.mongodb.net/?appName=Cluster0"
 
 client = MongoClient(MONGO_URI)
 
@@ -301,3 +301,4 @@ def home():
 
 if __name__ == '__main__':
     app.run(host="0.0.0.0", port=5000)
+
