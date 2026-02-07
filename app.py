@@ -177,8 +177,8 @@ def login():
 
     data = request.get_json()
 
-    email = data['email']
-    password = data['password']
+    email = data.get("email")
+    password = data.get("password")
 
     user = users_collection.find_one({
         "email": email,
@@ -188,17 +188,16 @@ def login():
     if user:
 
         return jsonify({
-            "status": "success",
             "name": user["name"],
             "email": user["email"],
-            "role": user["role"]
+            "role": user.get("role", "guest")
         })
 
     else:
         return jsonify({
-            "status": "failed",
-            "message": "Invalid credentials"
+            "error": "Invalid credentials"
         }), 401
+
 
 
 # ==================================================
@@ -357,4 +356,5 @@ def home():
 
 if __name__ == '__main__':
     app.run(host="0.0.0.0", port=5000)
+
 
