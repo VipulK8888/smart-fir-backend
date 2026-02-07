@@ -14,7 +14,7 @@ from pymongo import MongoClient
 
 # 🌍 Translation
 from deep_translator import GoogleTranslator
-from langdetect import detect
+from langdetect import detect, LangDetectException
 
 app = Flask(__name__)
 
@@ -25,30 +25,39 @@ app = Flask(__name__)
 MONGO_URI = os.environ.get("MONGO_URI")
 
 client = MongoClient(MONGO_URI)
-
 db = client["fir_database"]
 collection = db["confirmed_firs"]
 
 # --------------------------------------------------
-# 🌍 LANGUAGE DETECTION + TRANSLATION
+# 🌍 LANGUAGE DETECT + TRANSLATE
 # --------------------------------------------------
 
 def translate_to_english(text):
 
     try:
+        # Detect language
         lang = detect(text)
 
+        print("Detected Language:", lang)
+
+        # If already English → skip
         if lang == "en":
             return text
 
+        # Translate
         translated = GoogleTranslator(
             source='auto',
             target='en'
         ).translate(text)
 
-        print(f"Translated ({lang} → en): {translated}")
+        print("Translated Text:", translated)
 
         return translated
+
+    except LangDetectException:
+        # Happens for short text
+        print("Language detection failed → using original text")
+        return text
 
     except Exception as e:
         print("Translation Error:", e)
@@ -67,11 +76,14 @@ CRIME_KEYWORDS = {
 }
 
 def detect_crime_type(text):
+
     text = text.lower()
+
     for crime, keywords in CRIME_KEYWORDS.items():
         for word in keywords:
             if word in text:
                 return crime
+
     return "General Complaint"
 
 # --------------------------------------------------
@@ -171,12 +183,6 @@ def generate_pdf(fir_text, fir_id, watermark=None):
     c = canvas.Canvas(file_name, pagesize=A4)
     width, height = A4
 
-    # LOGO
-    logo_path = "police_logo.png"
-    if os.path.exists(logo_path):
-        c.drawImage(logo_path, 50, height - 100,
-                    width=60, height=60)
-
     # HEADER
     c.setFont("Helvetica-Bold", 14)
     c.drawString(150, height - 70, "Police Department")
@@ -189,12 +195,6 @@ def generate_pdf(fir_text, fir_id, watermark=None):
     for line in fir_text.split("\n"):
         c.drawString(50, y, line.strip())
         y -= 20
-
-    # SIGNATURE
-    c.drawString(50, 120,
-                 "Investigating Officer Signature: __________")
-    c.drawString(50, 90,
-                 "Station Seal: __________")
 
     # WATERMARK
     if watermark:
@@ -220,7 +220,7 @@ def generate_fir():
 
     description_original = data["description"]
 
-    # 🌍 Translate to English
+    # 🌍 Translate ANY language → English
     description = translate_to_english(description_original)
 
     crime_type = detect_crime_type(description)
@@ -243,6 +243,8 @@ Address: {address}
 
 Incident Details:
 {description}
+
+(Original Statement: {description_original})
 """
 
     return jsonify({"fir_draft": fir_text.strip()})
@@ -281,13 +283,9 @@ def confirm_fir():
         "status": "Confirmed"
     }
 
-    # Save to MongoDB
     collection.insert_one(fir_record)
-
-    # Excel Backup
     save_to_excel(fir_record)
 
-    # FIR TEXT
     fir_text = f"""
 FIRST INFORMATION REPORT (FIR)
 
@@ -325,15 +323,13 @@ def download_pdf(filename):
     )
 
 # --------------------------------------------------
-# HOME ROUTE
+# HOME
 # --------------------------------------------------
 
 @app.route('/')
 def home():
     return "Smart FIR Backend Running 🚔"
 
-# --------------------------------------------------
-# RUN SERVER
 # --------------------------------------------------
 
 if __name__ == '__main__':
