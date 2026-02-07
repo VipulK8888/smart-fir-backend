@@ -6,5 +6,4 @@ pymongo
 dnspython
 gunicorn
 deep-translator
-
-
+langdetect
