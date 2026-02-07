@@ -1,9 +1,8 @@
-flask
-pandas
-openpyxl
-reportlab
+Flask
 pymongo
 dnspython
+pandas
+reportlab
+googletrans==4.0.0-rc1
+httpx==0.13.3
 gunicorn
-deep-translator
-langdetect
