@@ -171,24 +171,35 @@ def register_user():
 # 🔐 LOGIN
 # ==================================================
 
+# LOGIN API
 @app.route('/login', methods=['POST'])
 def login():
 
-    data = request.json
+    data = request.get_json()
 
-    user = users_col.find_one({
-        "email": data["email"],
-        "password": data["password"]
+    email = data['email']
+    password = data['password']
+
+    user = users_collection.find_one({
+        "email": email,
+        "password": password
     })
 
     if user:
+
         return jsonify({
-            "role": user["role"],
+            "status": "success",
             "name": user["name"],
-            "email": user["email"]
+            "email": user["email"],
+            "role": user["role"]
         })
 
-    return jsonify({"message": "Invalid credentials"})
+    else:
+        return jsonify({
+            "status": "failed",
+            "message": "Invalid credentials"
+        }), 401
+
 
 # ==================================================
 # 📝 GENERATE FIR DRAFT
@@ -346,3 +357,4 @@ def home():
 
 if __name__ == '__main__':
     app.run(host="0.0.0.0", port=5000)
+
