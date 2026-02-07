@@ -13,7 +13,7 @@ from reportlab.lib.colors import Color
 from pymongo import MongoClient
 
 # 🌐 Translation
-from googletrans import Translator
+from deep_translator import GoogleTranslator
 
 app = Flask(__name__)
 
@@ -31,12 +31,15 @@ collection = db["confirmed_firs"]
 # 🌐 TRANSLATOR SETUP
 # --------------------------------------------------
 
-translator = Translator()
-
 def translate_to_english(text):
     try:
-        translated = translator.translate(text, dest='en')
-        return translated.text
+        translated = GoogleTranslator(
+            source='auto',
+            target='en'
+        ).translate(text)
+
+        return translated
+
     except Exception as e:
         print("Translation Error:", e)
         return text
@@ -302,3 +305,4 @@ def home():
 
 if __name__ == '__main__':
     app.run(host="0.0.0.0", port=5000)
+
