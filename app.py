@@ -12,6 +12,9 @@ from reportlab.lib.colors import Color
 # MongoDB
 from pymongo import MongoClient
 
+# 🌐 Translation
+from googletrans import Translator
+
 app = Flask(__name__)
 
 # --------------------------------------------------
@@ -21,9 +24,22 @@ app = Flask(__name__)
 MONGO_URI = os.environ.get("MONGO_URI")
 
 client = MongoClient(MONGO_URI)
-
 db = client["fir_database"]
 collection = db["confirmed_firs"]
+
+# --------------------------------------------------
+# 🌐 TRANSLATOR SETUP
+# --------------------------------------------------
+
+translator = Translator()
+
+def translate_to_english(text):
+    try:
+        translated = translator.translate(text, dest='en')
+        return translated.text
+    except Exception as e:
+        print("Translation Error:", e)
+        return text
 
 # --------------------------------------------------
 # NLP → CRIME DETECTION
@@ -104,20 +120,17 @@ def detect_address(text):
 # --------------------------------------------------
 
 def generate_fir_id():
-
     count = collection.count_documents({}) + 1
     year = datetime.now().year
-
     return f"FIR-{year}-{count:04d}"
 
 # --------------------------------------------------
-# EXCEL BACKUP (Optional)
+# EXCEL BACKUP
 # --------------------------------------------------
 
 def save_to_excel(data):
 
     file_name = "confirmed_firs.xlsx"
-
     df_new = pd.DataFrame([data])
 
     if os.path.exists(file_name):
@@ -129,7 +142,7 @@ def save_to_excel(data):
     df_final.to_excel(file_name, index=False)
 
 # --------------------------------------------------
-# PDF GENERATION (WITH WATERMARK)
+# PDF GENERATION
 # --------------------------------------------------
 
 def generate_pdf(fir_text, fir_id, watermark=None):
@@ -139,20 +152,14 @@ def generate_pdf(fir_text, fir_id, watermark=None):
     c = canvas.Canvas(file_name, pagesize=A4)
     width, height = A4
 
-    # LOGO
     logo_path = "police_logo.png"
     if os.path.exists(logo_path):
-        c.drawImage(logo_path, 50, height - 100,
-                    width=60, height=60)
+        c.drawImage(logo_path, 50, height - 100, width=60, height=60)
 
-    # HEADER
     c.setFont("Helvetica-Bold", 14)
-    c.drawString(150, height - 70,
-                 "Police Department")
-    c.drawString(150, height - 90,
-                 "Official FIR Report")
+    c.drawString(150, height - 70, "Police Department")
+    c.drawString(150, height - 90, "Official FIR Report")
 
-    # FIR TEXT
     c.setFont("Helvetica", 11)
     y = height - 140
 
@@ -160,13 +167,6 @@ def generate_pdf(fir_text, fir_id, watermark=None):
         c.drawString(50, y, line.strip())
         y -= 20
 
-    # SIGNATURE
-    c.drawString(50, 120,
-                 "Investigating Officer Signature: __________")
-    c.drawString(50, 90,
-                 "Station Seal: __________")
-
-    # WATERMARK
     if watermark:
         c.saveState()
         c.setFont("Helvetica-Bold", 60)
@@ -176,19 +176,20 @@ def generate_pdf(fir_text, fir_id, watermark=None):
         c.restoreState()
 
     c.save()
-
     return file_name
 
 # --------------------------------------------------
-# API → GENERATE FIR (DRAFT)
+# API → GENERATE FIR
 # --------------------------------------------------
 
 @app.route('/generate_fir', methods=['POST'])
 def generate_fir():
 
     data = request.get_json()
+    description_original = data["description"]
 
-    description = data["description"]
+    # 🌐 Translate
+    description = translate_to_english(description_original)
 
     crime_type = detect_crime_type(description)
     place = detect_place(description)
@@ -212,17 +213,23 @@ Incident Details:
 {description}
 """
 
-    return jsonify({"fir_draft": fir_text.strip()})
+    return jsonify({
+        "fir_draft": fir_text.strip(),
+        "translated_text": description
+    })
 
 # --------------------------------------------------
-# API → CONFIRM FIR (SAVE TO MONGODB)
+# API → CONFIRM FIR
 # --------------------------------------------------
 
 @app.route('/confirm_fir', methods=['POST'])
 def confirm_fir():
 
     data = request.get_json()
-    description = data["description"]
+    description_original = data["description"]
+
+    # 🌐 Translate
+    description = translate_to_english(description_original)
 
     crime_type = detect_crime_type(description)
     place = detect_place(description)
@@ -239,17 +246,14 @@ def confirm_fir():
         "place": place,
         "name": name,
         "address": address,
-        "description": description,
+        "description_original": description_original,
+        "description_translated": description,
         "status": "Confirmed"
     }
 
-    # Save to MongoDB
     collection.insert_one(fir_record)
-
-    # Excel backup
     save_to_excel(fir_record)
 
-    # FIR TEXT
     fir_text = f"""
 FIRST INFORMATION REPORT (FIR)
 
@@ -266,7 +270,6 @@ Incident Details:
 {description}
 """
 
-    # Generate Final PDF
     pdf_file = generate_pdf(fir_text, fir_id)
 
     return jsonify({
@@ -288,7 +291,7 @@ def download_pdf(filename):
     )
 
 # --------------------------------------------------
-# HOME ROUTE (Fix Not Found)
+# HOME
 # --------------------------------------------------
 
 @app.route('/')
@@ -296,13 +299,6 @@ def home():
     return "Smart FIR Backend Running 🚔"
 
 # --------------------------------------------------
-# RUN SERVER
-# --------------------------------------------------
 
 if __name__ == '__main__':
     app.run(host="0.0.0.0", port=5000)
-
-
-
-
-
