@@ -30,7 +30,6 @@ firs_col = db["confirmed_firs"]
 # ==================================================
 
 def translate_to_english(text):
-
     try:
         translated = GoogleTranslator(
             source='auto',
@@ -38,9 +37,8 @@ def translate_to_english(text):
         ).translate(text)
 
         return translated
-
     except:
-        return text  # fallback
+        return text  # fallback if translation fails
 
 # ==================================================
 # 🔍 NLP DETECTION
@@ -55,7 +53,6 @@ CRIME_KEYWORDS = {
 }
 
 def detect_crime_type(text):
-
     text = text.lower()
 
     for crime, keywords in CRIME_KEYWORDS.items():
@@ -65,8 +62,8 @@ def detect_crime_type(text):
 
     return "General Complaint"
 
-def detect_name(text):
 
+def detect_name(text):
     patterns = [
         r"my name is ([a-zA-Z ]+)",
         r"i am ([a-zA-Z ]+)"
@@ -79,8 +76,8 @@ def detect_name(text):
 
     return "Not Provided"
 
-def detect_place(text):
 
+def detect_place(text):
     patterns = [
         r"in ([a-zA-Z ]+)",
         r"at ([a-zA-Z ]+)",
@@ -99,10 +96,8 @@ def detect_place(text):
 # ==================================================
 
 def generate_fir_id():
-
     count = firs_col.count_documents({}) + 1
     year = datetime.now().year
-
     return f"FIR-{year}-{count:04d}"
 
 # ==================================================
@@ -118,14 +113,11 @@ def generate_pdf(fir_text, fir_id):
 
     # Header
     c.setFont("Helvetica-Bold", 14)
-    c.drawString(200, height - 50,
-                 "Police Department")
-    c.drawString(200, height - 70,
-                 "Official FIR Report")
+    c.drawString(180, height - 50, "Police Department")
+    c.drawString(180, height - 70, "Official FIR Report")
 
     # FIR Text
     c.setFont("Helvetica", 11)
-
     y = height - 120
 
     for line in fir_text.split("\n"):
@@ -137,7 +129,7 @@ def generate_pdf(fir_text, fir_id):
     c.setFont("Helvetica-Bold", 60)
     c.setFillColor(Color(0.85, 0.85, 0.85, alpha=0.3))
     c.rotate(45)
-    c.drawCentredString(400, 0, "DRAFT FIR")
+    c.drawCentredString(400, 0, "CONFIDENTIAL")
     c.restoreState()
 
     c.save()
@@ -145,7 +137,7 @@ def generate_pdf(fir_text, fir_id):
     return file_name
 
 # ==================================================
-# 👤 REGISTER
+# 👤 REGISTER USER
 # ==================================================
 
 @app.route('/register_user', methods=['POST'])
@@ -154,7 +146,10 @@ def register_user():
     data = request.json
 
     if users_col.find_one({"email": data["email"]}):
-        return jsonify({"message": "User exists"})
+        return jsonify({
+            "status": "failed",
+            "message": "User already exists"
+        })
 
     user = {
         "name": data["name"],
@@ -165,13 +160,15 @@ def register_user():
 
     users_col.insert_one(user)
 
-    return jsonify({"message": "Registered"})
+    return jsonify({
+        "status": "success",
+        "message": "Registered successfully"
+    })
 
 # ==================================================
 # 🔐 LOGIN
 # ==================================================
 
-# LOGIN API
 @app.route('/login', methods=['POST'])
 def login():
 
@@ -180,7 +177,7 @@ def login():
     email = data.get("email")
     password = data.get("password")
 
-    user = users_collection.find_one({
+    user = users_col.find_one({
         "email": email,
         "password": password
     })
@@ -188,6 +185,7 @@ def login():
     if user:
 
         return jsonify({
+            "status": "success",
             "name": user["name"],
             "email": user["email"],
             "role": user.get("role", "guest")
@@ -195,10 +193,28 @@ def login():
 
     else:
         return jsonify({
-            "error": "Invalid credentials"
+            "status": "failed",
+            "message": "Invalid credentials"
         }), 401
 
+# ==================================================
+# 👮 CREATE ADMIN (RUN ONCE)
+# ==================================================
 
+@app.route('/create_admin')
+def create_admin():
+
+    admin = {
+        "name": "Admin",
+        "email": "admin@police.com",
+        "password": "admin123",
+        "role": "admin"
+    }
+
+    if not users_col.find_one({"email": admin["email"]}):
+        users_col.insert_one(admin)
+
+    return "Admin Created Successfully"
 
 # ==================================================
 # 📝 GENERATE FIR DRAFT
@@ -246,7 +262,7 @@ def confirm_fir():
     data = request.json
 
     description = data["description"]
-    email = data["email"]
+    email = data.get("email", "guest")
 
     fir_id = generate_fir_id()
 
@@ -282,6 +298,7 @@ Description:
     pdf_file = generate_pdf(fir_text, fir_id)
 
     return jsonify({
+        "status": "success",
         "fir_id": fir_id,
         "pdf_file": pdf_file
     })
@@ -356,5 +373,3 @@ def home():
 
 if __name__ == '__main__':
     app.run(host="0.0.0.0", port=5000)
-
-
