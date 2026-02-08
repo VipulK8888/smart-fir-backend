@@ -26,19 +26,26 @@ users_col = db["users"]
 firs_col = db["confirmed_firs"]
 
 # ==================================================
-# 🌍 TRANSLATION → ANY LANGUAGE → ENGLISH
+# 🌍 TRANSLATE API
 # ==================================================
 
-def translate_to_english(text):
-    try:
-        translated = GoogleTranslator(
-            source='auto',
-            target='en'
-        ).translate(text)
+@app.route('/translate', methods=['POST'])
+def translate():
 
-        return translated
-    except:
-        return text  # fallback if translation fails
+    data = request.json
+    text = data.get("text", "")
+
+    if not text:
+        return jsonify({
+            "translated_text": ""
+        })
+
+    english_text = translate_to_english(text)
+
+    return jsonify({
+        "translated_text": english_text
+    })
+
 
 # ==================================================
 # 🔍 NLP DETECTION
@@ -373,3 +380,4 @@ def home():
 
 if __name__ == '__main__':
     app.run(host="0.0.0.0", port=5000)
+
