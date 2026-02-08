@@ -26,25 +26,54 @@ users_col = db["users"]
 firs_col = db["confirmed_firs"]
 
 # ==================================================
+# 🌍 TRANSLATION FUNCTION (SAFE)
+# ==================================================
+
+def translate_to_english(text):
+
+    try:
+        if not text.strip():
+            return ""
+
+        translated = GoogleTranslator(
+            source='auto',
+            target='en'
+        ).translate(text)
+
+        return translated
+
+    except Exception as e:
+        print("Translation Error:", e)
+        return text   # fallback
+
+
+# ==================================================
 # 🌍 TRANSLATE API
 # ==================================================
 
 @app.route('/translate', methods=['POST'])
 def translate():
 
-    data = request.json
-    text = data.get("text", "")
+    try:
 
-    if not text:
+        data = request.get_json()
+        text = data.get("text", "")
+
+        english_text = translate_to_english(text)
+
         return jsonify({
-            "translated_text": ""
+            "status": "success",
+            "translated_text": english_text
         })
 
-    english_text = translate_to_english(text)
+    except Exception as e:
 
-    return jsonify({
-        "translated_text": english_text
-    })
+        print("Translate API Error:", e)
+
+        return jsonify({
+            "status": "failed",
+            "translated_text": ""
+        }), 500
 
 
 # ==================================================
@@ -60,6 +89,7 @@ CRIME_KEYWORDS = {
 }
 
 def detect_crime_type(text):
+
     text = text.lower()
 
     for crime, keywords in CRIME_KEYWORDS.items():
@@ -71,6 +101,7 @@ def detect_crime_type(text):
 
 
 def detect_name(text):
+
     patterns = [
         r"my name is ([a-zA-Z ]+)",
         r"i am ([a-zA-Z ]+)"
@@ -85,6 +116,7 @@ def detect_name(text):
 
 
 def detect_place(text):
+
     patterns = [
         r"in ([a-zA-Z ]+)",
         r"at ([a-zA-Z ]+)",
@@ -98,14 +130,18 @@ def detect_place(text):
 
     return "Not Mentioned"
 
+
 # ==================================================
 # 🆔 FIR ID GENERATOR
 # ==================================================
 
 def generate_fir_id():
+
     count = firs_col.count_documents({}) + 1
     year = datetime.now().year
+
     return f"FIR-{year}-{count:04d}"
+
 
 # ==================================================
 # 📄 PDF GENERATION
@@ -143,6 +179,7 @@ def generate_pdf(fir_text, fir_id):
 
     return file_name
 
+
 # ==================================================
 # 👤 REGISTER USER
 # ==================================================
@@ -172,6 +209,7 @@ def register_user():
         "message": "Registered successfully"
     })
 
+
 # ==================================================
 # 🔐 LOGIN
 # ==================================================
@@ -199,10 +237,12 @@ def login():
         })
 
     else:
+
         return jsonify({
             "status": "failed",
             "message": "Invalid credentials"
         }), 401
+
 
 # ==================================================
 # 👮 CREATE ADMIN (RUN ONCE)
@@ -222,6 +262,7 @@ def create_admin():
         users_col.insert_one(admin)
 
     return "Admin Created Successfully"
+
 
 # ==================================================
 # 📝 GENERATE FIR DRAFT
@@ -258,6 +299,7 @@ Incident:
         "fir_draft": fir_text.strip(),
         "translated_text": english_text
     })
+
 
 # ==================================================
 # ✅ CONFIRM FIR
@@ -310,6 +352,7 @@ Description:
         "pdf_file": pdf_file
     })
 
+
 # ==================================================
 # 👮 ADMIN → ALL FIRS
 # ==================================================
@@ -322,6 +365,7 @@ def get_all_firs():
     )
 
     return jsonify(firs)
+
 
 # ==================================================
 # 👤 GUEST → MY FIRS
@@ -339,6 +383,7 @@ def get_my_firs(email):
 
     return jsonify(firs)
 
+
 # ==================================================
 # 🔎 FIR DETAIL
 # ==================================================
@@ -353,6 +398,7 @@ def get_fir(fir_id):
 
     return jsonify(fir)
 
+
 # ==================================================
 # 📥 DOWNLOAD PDF
 # ==================================================
@@ -366,6 +412,7 @@ def download_pdf(filename):
         as_attachment=True
     )
 
+
 # ==================================================
 # 🏠 HOME
 # ==================================================
@@ -374,10 +421,10 @@ def download_pdf(filename):
 def home():
     return "Smart FIR Backend Running 🚔"
 
+
 # ==================================================
 # RUN
 # ==================================================
 
 if __name__ == '__main__':
     app.run(host="0.0.0.0", port=5000)
-
