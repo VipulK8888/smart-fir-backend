@@ -253,7 +253,7 @@ def create_admin():
 
     admin = {
         "name": "Admin",
-        "email": "admin@police.com",
+        "email": "admin@fir.com",
         "password": "admin123",
         "role": "admin"
     }
@@ -428,3 +428,4 @@ def home():
 
 if __name__ == '__main__':
     app.run(host="0.0.0.0", port=5000)
+
