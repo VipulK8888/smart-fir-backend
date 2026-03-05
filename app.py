@@ -3,7 +3,7 @@ import re
 from datetime import datetime
 
 from flask import Flask, request, jsonify, send_from_directory
-from flask_cors import CORS
+from flask_cors import CORS, cross_origin
 from pymongo import MongoClient
 
 from reportlab.lib.pagesizes import A4
