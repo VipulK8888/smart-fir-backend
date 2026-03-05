@@ -305,7 +305,7 @@ def confirm_fir():
             "place": place,
             "description": description,
             "date": date_today,
-            "status": "Confirmed" # Added for UI matching
+            "status": "Pending" # Defaults to Pending now
         }
 
         firs_col.insert_one(fir_record)
@@ -327,6 +327,31 @@ Description:
             "fir_id": fir_id,
             "pdf_file": pdf_file
         })
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+# ==================================================
+# 👮 ADMIN → UPDATE FIR STATUS
+# ==================================================
+@app.route('/update_fir_status', methods=['POST'])
+def update_fir_status():
+    try:
+        data = request.get_json()
+        if not data or not all(k in data for k in ("fir_id", "status")):
+            return jsonify({"status": "error", "message": "Missing fir_id or status"}), 400
+            
+        fir_id = data["fir_id"]
+        status = data["status"] # 'Approved' or 'Rejected'
+        
+        result = firs_col.update_one(
+            {"fir_id": fir_id},
+            {"$set": {"status": status}}
+        )
+        
+        if result.modified_count > 0:
+            return jsonify({"status": "success", "message": f"FIR marked as {status}"})
+        else:
+            return jsonify({"status": "error", "message": "FIR not found or status already matches"}), 404
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
