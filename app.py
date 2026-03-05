@@ -391,19 +391,44 @@ def get_fir(fir_id):
         return jsonify({"status": "error", "message": str(e)}), 500
 
 # ==================================================
-# 📥 DOWNLOAD PDF
+# 📥 SERVE OR REGENERATE PDF
 # ==================================================
-@app.route('/download_pdf/<filename>')
-def download_pdf(filename):
+@app.route('/pdfs/<filename>')
+@cross_origin()
+def serve_pdf(filename):
     try:
-        return send_from_directory(
-            directory=os.getcwd(),
-            path=filename,
-            as_attachment=True
-        )
-    except Exception as e:
-         return jsonify({"status": "error", "message": "File not found"}), 404
+        # Check if the file exists locally first
+        if os.path.exists(os.path.join("pdfs", filename)):
+            return send_from_directory('pdfs', filename)
+            
+        # If it doesn't exist (due to server restart), regenerate it from MongoDB
+        fir_id = filename.replace(".pdf", "")
+        fir = firs_col.find_one({"fir_id": fir_id})
+        
+        if not fir:
+            return jsonify({"status": "error", "message": "FIR not found"}), 404
+            
+        # Re-create the text exactly as it was
+        fir_text = f"""FIR ID: {fir.get('fir_id')}
+Date: {fir.get('date')}
+Crime: {fir.get('crime_type')}
+Name: {fir.get('name')}
+Place: {fir.get('place')}
 
+Description:
+{fir.get('description', '')}
+"""
+        # Regenerate the PDF physically
+        generate_pdf(fir_text, fir_id)
+        
+        # Serve the newly generated file
+        if os.path.exists(os.path.join("pdfs", filename)):
+            return send_from_directory('pdfs', filename)
+        else:
+            return jsonify({"status": "error", "message": "Failed to generate PDF on the fly"}), 500
+            
+    except Exception as e:
+        return jsonify({"status": "error", "message": f"Server Error: {str(e)}"}), 500
 # ==================================================
 # 🏠 HOME
 # ==================================================
