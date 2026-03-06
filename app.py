@@ -596,8 +596,28 @@ def chat():
              
         messages = data["messages"]
         
+        # 1. Dynamically find the best model for this particular API Key
+        chat_model_name = "gemini-1.5-flash" # Default fallback
+        try:
+            available_models = genai.list_models()
+            valid_models = [m.name for m in available_models if 'generateContent' in m.supported_generation_methods]
+            print("Accessible Gemini Models:", valid_models)
+            
+            if valid_models:
+                chat_model_name = valid_models[0] # Pick the first available
+                # Prefer flash or pro if available
+                for name in valid_models:
+                    if 'gemini-1.5-flash' in name:
+                        chat_model_name = name
+                        break
+        except Exception as e:
+             # Catch API Key Invalid errors 
+             return jsonify({"status": "error", "message": "API Key is invalid or restricted. Please create a new free API Key from Google AI Studio and update your Render Environment Variables."}), 400
+
+        print(f"Using Google AI Model: {chat_model_name}")
+
         gemini_history = []
-        # Inject system prompt into history for `gemini-pro` compatibility
+        # Inject system prompt into history for older model compatibility
         gemini_history.append({"role": "user", "parts": [SYSTEM_PROMPT]})
         gemini_history.append({"role": "model", "parts": ["Understood. I will act as the TrueFile AI Police Assistant and gather the required FIR details."]})
         
@@ -607,7 +627,7 @@ def chat():
             
         latest_message = messages[-1]["text"]
         
-        model = genai.GenerativeModel(model_name="gemini-1.5-flash")
+        model = genai.GenerativeModel(model_name=chat_model_name)
         
         chat_session = model.start_chat(history=gemini_history)
         response = chat_session.send_message(latest_message)
