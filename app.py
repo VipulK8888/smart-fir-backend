@@ -14,6 +14,29 @@ from reportlab.lib import colors
 from deep_translator import GoogleTranslator
 import spacy
 import subprocess
+import google.generativeai as genai
+
+# Setup Gemini API key
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
+
+SYSTEM_PROMPT = """You are a helpful and empathetic Police Assistant helping a user draft an FIR (First Information Report).
+Your goal is to gather the following details one by one from the user in a natural conversation:
+1. Complainant Name
+2. Age
+3. Contact Number / Email
+4. Incident Date and Time
+5. Location of the Incident
+6. Respondent Details (who committed the crime, if known)
+7. The Incident Description (what happened)
+
+Rules:
+- Be empathetic and professional.
+- Ask only one or two questions at a time. Do not overwhelm the user.
+- If the user doesn't know something (like the respondent's name), tell them it's okay and proceed.
+- Once you have gathered sufficient information to write a complete FIR, output a final message starting exactly with '[FIR_COMPLETE]' followed by a detailed narrative containing all the information collected. The narrative should be written primarily in the first person ("I, [Name], was at...") or whatever works best for a formal police complaint. Do not append any other conversational text after the narrative. Let the narrative be the entire unadulterated payload after the '[FIR_COMPLETE]' keyword.
+"""
 
 # Load SpaCy model, download if missing
 try:
@@ -558,6 +581,44 @@ def serve_pdf(filename):
             
     except Exception as e:
         return jsonify({"status": "error", "message": f"Server Error: {str(e)}"}), 500
+# ==================================================
+# 🤖 CHATBOT API (GEMINI GUIDED FIR)
+# ==================================================
+@app.route('/chat', methods=['POST'])
+def chat():
+    try:
+        data = request.get_json()
+        if not data or "messages" not in data:
+            return jsonify({"status": "error", "message": "Missing messages array"}), 400
+            
+        if not GEMINI_API_KEY:
+             return jsonify({"status": "error", "message": "Backend is missing GEMINI_API_KEY environment variable. Chatbot is offline."}), 500
+             
+        messages = data["messages"]
+        
+        gemini_history = []
+        for msg in messages[:-1]: # All except the last one
+            role = "user" if msg["role"] == "user" else "model"
+            gemini_history.append({"role": role, "parts": [msg["text"]]})
+            
+        latest_message = messages[-1]["text"]
+        
+        model = genai.GenerativeModel(
+            model_name="gemini-1.5-flash",
+            system_instruction=SYSTEM_PROMPT
+        )
+        
+        chat_session = model.start_chat(history=gemini_history)
+        response = chat_session.send_message(latest_message)
+        
+        return jsonify({
+            "status": "success",
+            "reply": response.text
+        })
+    except Exception as e:
+        print("Chat Error:", e)
+        return jsonify({"status": "error", "message": f"Server Error: {str(e)}"}), 500
+
 # ==================================================
 # 🏠 HOME
 # ==================================================
