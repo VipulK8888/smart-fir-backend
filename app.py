@@ -6,11 +6,22 @@ from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS, cross_origin
 from pymongo import MongoClient
 
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.pagesizes import A4
-from reportlab.pdfgen import canvas
-from reportlab.lib.colors import Color
+from reportlab.lib import colors
 
 from deep_translator import GoogleTranslator
+import spacy
+import subprocess
+
+# Load SpaCy model, download if missing
+try:
+    nlp = spacy.load("en_core_web_sm")
+except OSError:
+    print("Downloading SpaCy NLP model...")
+    subprocess.run(["python", "-m", "spacy", "download", "en_core_web_sm"])
+    nlp = spacy.load("en_core_web_sm")
 
 app = Flask(__name__)
 # Enable CORS so Flutter Web can communicate with the backend
@@ -74,44 +85,32 @@ def translate():
 # 🔍 NLP DETECTION
 # ==================================================
 CRIME_KEYWORDS = {
-    "Theft": ["theft", "stolen", "steal", "chori"],
-    "Robbery": ["robbery", "rob", "snatch", "loot"],
-    "Assault": ["assault", "attack", "hit", "beat"],
-    "Cyber Crime": ["hack", "fraud", "scam", "online"],
-    "Murder": ["murder", "killed", "dead"]
+    "Theft/Burglary": ["theft", "stolen", "steal", "chori", "robbery", "snatch", "loot", "pickpocket", "burgle", "rob"],
+    "Assault/Violence": ["assault", "attack", "hit", "beat", "punch", "stab", "violence", "murder", "kill", "dead", "fight"],
+    "Cyber Crime": ["hack", "fraud", "scam", "online", "phishing", "bank", "otp"],
+    "Harassment/Sexual Offense": ["harass", "rape", "molest", "touch", "outrage", "stalk", "eve"],
+    "Kidnapping/Abduction": ["kidnap", "abduct", "missing", "ransom"]
 }
 
 def detect_crime_type(text):
     text = text.lower()
     for crime, keywords in CRIME_KEYWORDS.items():
-        for word in keywords:
-            if word in text:
-                return crime
+        if any(kw in text for kw in keywords):
+            return crime
     return "General Complaint"
 
-def detect_name(text):
-    patterns = [
-        r"my name is ([a-zA-Z ]+)",
-        r"i am ([a-zA-Z ]+)",
-        r"mera naam ([a-zA-Z ]+) hai"
-    ]
-    for p in patterns:
-        match = re.search(p, text.lower())
-        if match:
-            return match.group(1).title()
-    return "Not Provided"
-
-def detect_place(text):
-    patterns = [
-        r"in ([a-zA-Z ]+)",
-        r"at ([a-zA-Z ]+)",
-        r"near ([a-zA-Z ]+)"
-    ]
-    for p in patterns:
-        match = re.search(p, text.lower())
-        if match:
-            return match.group(1).title()
-    return "Not Mentioned"
+def extract_entities(text):
+    doc = nlp(text)
+    names = [ent.text.title() for ent in doc.ents if ent.label_ == "PERSON"]
+    places = [ent.text.title() for ent in doc.ents if ent.label_ in ["GPE", "LOC", "FAC"]]
+    
+    # Exclude basic stop words that spacy sometimes misidentifies
+    names = [n for n in names if n.lower() not in ["i", "me", "my", "he", "she", "they", "we", "us", "him", "her"]]
+    
+    return {
+        "name": names[0] if names else "Not Provided",
+        "place": ", ".join(set(places)) if places else "Not Mentioned"
+    }
 
 # ==================================================
 # 🆔 FIR ID GENERATOR
@@ -124,33 +123,109 @@ def generate_fir_id():
 # ==================================================
 # 📄 PDF GENERATION
 # ==================================================
-def generate_pdf(fir_text, fir_id):
-    file_name = f"{fir_id}.pdf"
-    c = canvas.Canvas(file_name, pagesize=A4)
-    width, height = A4
+def add_watermark(canvas, document):
+    canvas.saveState()
+    canvas.setFont("Helvetica-Bold", 60)
+    canvas.setFillColor(colors.Color(0.85, 0.85, 0.85, alpha=0.3))
+    canvas.translate(300, 400)
+    canvas.rotate(45)
+    canvas.drawCentredString(0, 0, "CONFIDENTIAL")
+    canvas.restoreState()
 
+def generate_pdf(fir_data, fir_id):
+    os.makedirs("pdfs", exist_ok=True)
+    file_name = os.path.join("pdfs", f"{fir_id}.pdf")
+    
+    doc = SimpleDocTemplate(file_name, pagesize=A4, rightMargin=30, leftMargin=30, topMargin=30, bottomMargin=30)
+    elements = []
+    
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle(
+        name='TitleStyle',
+        parent=styles['Heading1'],
+        alignment=1, # Center
+        fontSize=14,
+        spaceAfter=10
+    )
+    normal_style = styles['Normal']
+    
     # Header
-    c.setFont("Helvetica-Bold", 14)
-    c.drawString(180, height - 50, "Police Department")
-    c.drawString(180, height - 70, "Official FIR Report")
-
-    # FIR Text
-    c.setFont("Helvetica", 11)
-    y = height - 120
-
-    for line in fir_text.split("\n"):
-        c.drawString(50, y, line.strip())
-        y -= 18
-
-    # Watermark
-    c.saveState()
-    c.setFont("Helvetica-Bold", 60)
-    c.setFillColor(Color(0.85, 0.85, 0.85, alpha=0.3))
-    c.rotate(45)
-    c.drawCentredString(400, 0, "CONFIDENTIAL")
-    c.restoreState()
-
-    c.save()
+    elements.append(Paragraph("<b>FIRST INFORMATION REPORT</b>", title_style))
+    elements.append(Paragraph("(Under Section 154 Cr.P.C.)", ParagraphStyle(name='SubTitle', parent=styles['Normal'], alignment=1, spaceAfter=20)))
+    
+    # Information Table
+    data1 = [
+        ["1. District / Police Station:", "Virtual Police Station", "Year:", str(datetime.now().year)],
+        ["   FIR No.:", fir_id, "Date:", fir_data.get('date', datetime.now().strftime('%d-%m-%Y'))],
+    ]
+    t1 = Table(data1, colWidths=[150, 150, 80, 150])
+    t1.setStyle(TableStyle([
+        ('ALIGN', (0,0), (-1,-1), 'LEFT'),
+        ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+    ]))
+    elements.append(t1)
+    elements.append(Spacer(1, 10))
+    
+    data2 = [
+        ["2. Acts & Sections:", fir_data.get('crime_type', 'General Offense')],
+        ["3. (a) Occurrence of Offense:", "Date: Unknown   Time: Unknown "],
+        ["   (b) Information received at P.S.:", f"Date: {fir_data.get('date', '-')} "],
+        ["4. Type of Information:", "Written / Typed (Online Submission)"],
+    ]
+    t2 = Table(data2, colWidths=[180, 350])
+    t2.setStyle(TableStyle([
+        ('GRID', (0,0), (-1,-1), 0.5, colors.black),
+        ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+        ('PADDING', (0,0), (-1,-1), 6),
+    ]))
+    elements.append(t2)
+    elements.append(Spacer(1, 10))
+    
+    data3 = [
+        ["5. Place of Occurrence:", fir_data.get('place', 'Unknown')],
+        ["6. Complainant / Informant:", ""],
+        ["   (a) Name:", fir_data.get('name', 'Unknown')],
+        ["   (b) Contact / Email:", fir_data.get('email', 'Unknown')],
+        ["7. Details of accused:", "As described in the incident"],
+        ["8. Reasons for delay:", "N/A"],
+        ["9. Properties Stolen:", "N/A"],
+    ]
+    
+    t3 = Table(data3, colWidths=[180, 350])
+    t3.setStyle(TableStyle([
+        ('GRID', (0,0), (-1,-1), 0.5, colors.black),
+        ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+        ('PADDING', (0,0), (-1,-1), 6),
+    ]))
+    elements.append(t3)
+    elements.append(Spacer(1, 10))
+    
+    # Description
+    elements.append(Paragraph("<b>10. First Information contents (Description of Incident):</b>", styles['Heading3']))
+    elements.append(Spacer(1, 5))
+    
+    incident_text = fir_data.get('description', '')
+    for line in incident_text.split('\n'):
+        if line.strip():
+            elements.append(Paragraph(line.strip(), normal_style))
+            elements.append(Spacer(1, 2))
+    
+    elements.append(Spacer(1, 40))
+    
+    # Signatures
+    sig_data = [
+        ["-----------------------------------------", "-----------------------------------------"],
+        ["Signature / Thumb impression", "Signature of Officer-in-Charge"],
+        ["of the Complainant / Informant", "Police Station"],
+    ]
+    t_sig = Table(sig_data, colWidths=[265, 265])
+    t_sig.setStyle(TableStyle([
+        ('ALIGN', (0,0), (-1,-1), 'CENTER'),
+        ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+    ]))
+    elements.append(t_sig)
+    
+    doc.build(elements, onFirstPage=add_watermark, onLaterPages=add_watermark)
     return file_name
 
 # ==================================================
@@ -251,8 +326,9 @@ def generate_fir():
         english_text = translate_to_english(original_text)
 
         crime = detect_crime_type(english_text)
-        name = detect_name(english_text)
-        place = detect_place(english_text)
+        entities = extract_entities(english_text)
+        name = entities["name"]
+        place = entities["place"]
 
         date_today = datetime.now().strftime("%d-%m-%Y")
 
@@ -292,8 +368,9 @@ def confirm_fir():
         fir_id = generate_fir_id()
 
         crime = detect_crime_type(description)
-        name = detect_name(description)
-        place = detect_place(description)
+        entities = extract_entities(description)
+        name = entities["name"]
+        place = entities["place"]
 
         date_today = datetime.now().strftime("%d-%m-%Y")
 
@@ -310,17 +387,7 @@ def confirm_fir():
 
         firs_col.insert_one(fir_record)
 
-        fir_text = f"""FIR ID: {fir_id}
-Date: {date_today}
-Crime: {crime}
-Name: {name}
-Place: {place}
-
-Description:
-{description}
-"""
-
-        pdf_file = generate_pdf(fir_text, fir_id)
+        pdf_file = generate_pdf(fir_record, fir_id)
 
         return jsonify({
             "status": "success",
@@ -408,18 +475,8 @@ def serve_pdf(filename):
         if not fir:
             return jsonify({"status": "error", "message": "FIR not found"}), 404
             
-        # Re-create the text exactly as it was
-        fir_text = f"""FIR ID: {fir.get('fir_id')}
-Date: {fir.get('date')}
-Crime: {fir.get('crime_type')}
-Name: {fir.get('name')}
-Place: {fir.get('place')}
-
-Description:
-{fir.get('description', '')}
-"""
         # Regenerate the PDF physically
-        generate_pdf(fir_text, fir_id)
+        generate_pdf(fir, fir_id)
         
         # Serve the newly generated file
         if os.path.exists(os.path.join("pdfs", filename)):
