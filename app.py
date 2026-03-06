@@ -459,7 +459,7 @@ def update_fir_status():
 @app.route('/get_all_firs')
 def get_all_firs():
     try:
-        firs = list(firs_col.find({}, {"_id": 0}).sort("date", -1)) # Add sort by newest
+        firs = list(firs_col.find({}, {"_id": 0}).sort("_id", -1)) # Add sort by newest
         return jsonify(firs)
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
@@ -470,7 +470,7 @@ def get_all_firs():
 @app.route('/get_my_firs/<email>')
 def get_my_firs(email):
     try:
-        firs = list(firs_col.find({"email": email}, {"_id": 0}).sort("date", -1))
+        firs = list(firs_col.find({"email": email}, {"_id": 0}).sort("_id", -1))
         return jsonify(firs)
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
