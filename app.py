@@ -607,7 +607,7 @@ def chat():
             
         latest_message = messages[-1]["text"]
         
-        model = genai.GenerativeModel(model_name="gemini-pro")
+        model = genai.GenerativeModel(model_name="gemini-1.5-flash")
         
         chat_session = model.start_chat(history=gemini_history)
         response = chat_session.send_message(latest_message)
