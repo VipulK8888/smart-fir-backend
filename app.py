@@ -125,18 +125,18 @@ def generate_fir_id():
 # ==================================================
 def add_watermark(canvas, document):
     canvas.saveState()
-    canvas.setFont("Helvetica-Bold", 60)
+    canvas.setFont("Helvetica-Bold", 45)
     canvas.setFillColor(colors.Color(0.85, 0.85, 0.85, alpha=0.3))
     canvas.translate(300, 400)
     canvas.rotate(45)
-    canvas.drawCentredString(0, 0, "CONFIDENTIAL")
+    canvas.drawCentredString(0, 0, "SYSTEM GENERATED DRAFT")
     canvas.restoreState()
 
 def generate_pdf(fir_data, fir_id):
     os.makedirs("pdfs", exist_ok=True)
     file_name = os.path.join("pdfs", f"{fir_id}.pdf")
     
-    doc = SimpleDocTemplate(file_name, pagesize=A4, rightMargin=30, leftMargin=30, topMargin=30, bottomMargin=30)
+    doc = SimpleDocTemplate(file_name, pagesize=A4, rightMargin=30, leftMargin=30, topMargin=40, bottomMargin=30)
     elements = []
     
     styles = getSampleStyleSheet()
@@ -144,86 +144,117 @@ def generate_pdf(fir_data, fir_id):
         name='TitleStyle',
         parent=styles['Heading1'],
         alignment=1, # Center
-        fontSize=14,
-        spaceAfter=10
+        fontSize=18,
+        spaceAfter=5
+    )
+    sub_title_style = ParagraphStyle(
+        name='SubTitle', 
+        parent=styles['Normal'], 
+        alignment=1, 
+        fontSize=9,
+        leading=11,
+        spaceAfter=20
     )
     normal_style = styles['Normal']
     
-    # Header
-    elements.append(Paragraph("<b>FIRST INFORMATION REPORT</b>", title_style))
-    elements.append(Paragraph("(Under Section 154 Cr.P.C.)", ParagraphStyle(name='SubTitle', parent=styles['Normal'], alignment=1, spaceAfter=20)))
+    # 1. Header
+    elements.append(Paragraph("<b>INCIDENT REPORT</b>", title_style))
+    elements.append(Paragraph("Lorem ipsum dolor sit amet<br/>Innoshebrief docomartomislex axhoenshant<br/>asein.anudtinaoveniteamerittisato<br/>crfteom complemers", sub_title_style))
     
-    # Information Table
-    data1 = [
-        ["1. District / Police Station:", "Virtual Police Station", "Year:", str(datetime.now().year)],
-        ["   FIR No.:", fir_id, "Date:", fir_data.get('date', datetime.now().strftime('%d-%m-%Y'))],
+    # 2. Main Large Table
+    table_data = []
+
+    # Row 1: Date
+    table_data.append([Paragraph(f"<b>Date:</b> {fir_data.get('date', datetime.now().strftime('%d %B %Y'))}", normal_style), ""])
+    
+    # Row 2: Location
+    table_data.append([Paragraph(f"<b>Location:</b> {fir_data.get('place', 'Unknown')}", normal_style), ""])
+
+    # Row 3: Complainant Details (Split columns)
+    table_data.append([
+        Paragraph("<b>Complainant Details:</b><br/>" + fir_data.get('name', 'Unknown').split()[0], normal_style),
+        Paragraph("<b>Last Name:</b><br/>" + (fir_data.get('name', 'Unknown').split()[-1] if len(fir_data.get('name', 'Unknown').split()) > 1 else ""), normal_style)
+    ])
+
+    # Row 4: Respondent Details
+    table_data.append([Paragraph("<b>Respondent Details:</b><br/>Unknown", normal_style), ""])
+
+    # Row 5: Address (Split)
+    table_data.append([
+        Paragraph("<b>Address:</b><br/>Not Provided", normal_style),
+        Paragraph("<b>Contact number:</b><br/>" + fir_data.get('email', 'Unknown'), normal_style)
+    ])
+
+    # Row 6: Height/Age
+    table_data.append([
+        Paragraph("<b>Complainant Height (m):</b>", normal_style),
+        Paragraph("<b>Age:</b> 32", normal_style)
+    ])
+
+    # Row 7: Pen Name
+    table_data.append([
+         Paragraph("<b>Pen Name:</b><br/>Complainant details", normal_style),
+         Paragraph("<b>Community:</b>", normal_style)
+    ])
+
+    # Row 8: Incident Description
+    desc_para = Paragraph("<b>Incident Description:</b><br/>" + fir_data.get('description', 'No description provided.'), normal_style)
+    table_data.append([desc_para, ""])
+
+    # Row 9: Complainant Information
+    table_data.append([Paragraph("<b>Complainant Information</b>", normal_style), ""])
+
+    # Row 10: Complainant Details (Duplicate section from image)
+    table_data.append([Paragraph("<b>Complainant Details:</b><br/>Sample Complaint", normal_style), ""])
+
+    # Row 11: Descriptive details
+    table_data.append([
+        Paragraph("<b>Demographics:</b>", normal_style),
+        Paragraph("<b>Status of incident:</b>", normal_style)
+    ])
+
+    # Row 12: Complaint Title
+    table_data.append([Paragraph("<b>Complaint:</b>", normal_style), ""])
+
+    # Rows 13-14: Extras
+    table_data.append([Paragraph("<b>Extra:</b>", normal_style), "Sample Data"])
+    table_data.append([Paragraph("<b>Address:</b>", normal_style), "Sample Data"])
+    table_data.append([Paragraph("<b>Secondary Information</b>", normal_style), ""])
+    table_data.append([Paragraph("<b>Commodities:</b>", normal_style), "Sample Data"])
+
+
+    # Construct Table
+    t = Table(table_data, colWidths=[260, 260])
+
+    # Add complex spanning and grid styling to match the image exactly
+    grid_style = [
+        # Box around the entire table
+        ('BOX', (0,0), (-1,-1), 1, colors.black),
+        ('INNERGRID', (0,0), (-1,-1), 0.5, colors.black),
+        
+        # Span columns for full-width rows
+        ('SPAN', (0,0), (1,0)), # Date
+        ('SPAN', (0,1), (1,1)), # Location
+        ('SPAN', (0,3), (1,3)), # Respondent
+        ('SPAN', (0,7), (1,7)), # Description (make it tall)
+        ('SPAN', (0,8), (1,8)), # Complainant Information
+        ('SPAN', (0,9), (1,9)), # Complainant Details
+        ('SPAN', (0,11), (1,11)), # Complaint
+        ('SPAN', (0,14), (1,14)), # Secondary Info
+        
+        # Padding
+        ('TOPPADDING', (0,0), (-1,-1), 6),
+        ('BOTTOMPADDING', (0,0), (-1,-1), 6),
+        ('LEFTPADDING', (0,0), (-1,-1), 10),
+        ('RIGHTPADDING', (0,0), (-1,-1), 10),
+        
+        # Backgrounds for section headers
+        ('BACKGROUND', (0,8), (1,8), colors.lightgrey),
+        ('BACKGROUND', (0,14), (1,14), colors.lightgrey),
     ]
-    t1 = Table(data1, colWidths=[150, 150, 80, 150])
-    t1.setStyle(TableStyle([
-        ('ALIGN', (0,0), (-1,-1), 'LEFT'),
-        ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
-    ]))
-    elements.append(t1)
-    elements.append(Spacer(1, 10))
-    
-    data2 = [
-        ["2. Acts & Sections:", fir_data.get('crime_type', 'General Offense')],
-        ["3. (a) Occurrence of Offense:", "Date: Unknown   Time: Unknown "],
-        ["   (b) Information received at P.S.:", f"Date: {fir_data.get('date', '-')} "],
-        ["4. Type of Information:", "Written / Typed (Online Submission)"],
-    ]
-    t2 = Table(data2, colWidths=[180, 350])
-    t2.setStyle(TableStyle([
-        ('GRID', (0,0), (-1,-1), 0.5, colors.black),
-        ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
-        ('PADDING', (0,0), (-1,-1), 6),
-    ]))
-    elements.append(t2)
-    elements.append(Spacer(1, 10))
-    
-    data3 = [
-        ["5. Place of Occurrence:", fir_data.get('place', 'Unknown')],
-        ["6. Complainant / Informant:", ""],
-        ["   (a) Name:", fir_data.get('name', 'Unknown')],
-        ["   (b) Contact / Email:", fir_data.get('email', 'Unknown')],
-        ["7. Details of accused:", "As described in the incident"],
-        ["8. Reasons for delay:", "N/A"],
-        ["9. Properties Stolen:", "N/A"],
-    ]
-    
-    t3 = Table(data3, colWidths=[180, 350])
-    t3.setStyle(TableStyle([
-        ('GRID', (0,0), (-1,-1), 0.5, colors.black),
-        ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
-        ('PADDING', (0,0), (-1,-1), 6),
-    ]))
-    elements.append(t3)
-    elements.append(Spacer(1, 10))
-    
-    # Description
-    elements.append(Paragraph("<b>10. First Information contents (Description of Incident):</b>", styles['Heading3']))
-    elements.append(Spacer(1, 5))
-    
-    incident_text = fir_data.get('description', '')
-    for line in incident_text.split('\n'):
-        if line.strip():
-            elements.append(Paragraph(line.strip(), normal_style))
-            elements.append(Spacer(1, 2))
-    
-    elements.append(Spacer(1, 40))
-    
-    # Signatures
-    sig_data = [
-        ["-----------------------------------------", "-----------------------------------------"],
-        ["Signature / Thumb impression", "Signature of Officer-in-Charge"],
-        ["of the Complainant / Informant", "Police Station"],
-    ]
-    t_sig = Table(sig_data, colWidths=[265, 265])
-    t_sig.setStyle(TableStyle([
-        ('ALIGN', (0,0), (-1,-1), 'CENTER'),
-        ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
-    ]))
-    elements.append(t_sig)
+
+    t.setStyle(TableStyle(grid_style))
+    elements.append(t)
     
     doc.build(elements, onFirstPage=add_watermark, onLaterPages=add_watermark)
     return file_name
