@@ -378,6 +378,13 @@ Incident:
         return jsonify({
             "status": "success", # Added standard status
             "fir_draft": fir_text.strip(),
+            "fir_data": {
+                "date": date_today,
+                "crime_type": crime,
+                "place": place,
+                "name": name,
+                "description": english_text
+            },
             "translated_text": english_text
         })
     except Exception as e:
