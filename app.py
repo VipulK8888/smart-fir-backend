@@ -105,11 +105,33 @@ def extract_entities(text):
     places = [ent.text.title() for ent in doc.ents if ent.label_ in ["GPE", "LOC", "FAC"]]
     
     # Exclude basic stop words that spacy sometimes misidentifies
-    names = [n for n in names if n.lower() not in ["i", "me", "my", "he", "she", "they", "we", "us", "him", "her"]]
+    stop_words = ["i", "me", "my", "he", "she", "they", "we", "us", "him", "her", "unknown", "some"]
+    names = [n for n in names if n.lower() not in stop_words]
+    
+    name = names[0] if len(names) > 0 else "Unknown"
+    respondent = names[1] if len(names) > 1 else "Unknown"
+    place = ", ".join(set(places)) if places else "Unknown"
+
+    contact_match = re.search(r'\b\d{10}\b', text)
+    contact = contact_match.group(0) if contact_match else "Unknown"
+
+    age_match = re.search(r'\b(\d{1,3})\s*(?:years|yrs)\s*(?:old|of age)?\b|\bage(?:d)?\s*(?:is)?\s*(\d{1,3})\b', text, re.IGNORECASE)
+    age = "Unknown"
+    if age_match:
+        age = age_match.group(1) or age_match.group(2) or "Unknown"
+
+    height_match = re.search(r'\b(\d{1,3}(?:\.\d{1,2})?)\s*(cm|m|feet|ft|inches|in)\b', text, re.IGNORECASE)
+    height = f"{height_match.group(1)} {height_match.group(2)}" if height_match else "Unknown"
     
     return {
-        "name": names[0] if names else "Not Provided",
-        "place": ", ".join(set(places)) if places else "Not Mentioned"
+        "name": name,
+        "respondent": respondent,
+        "place": place,
+        "address": place,
+        "contact": contact,
+        "age": age,
+        "height": height,
+        "demographic": "Unknown"
     }
 
 # ==================================================
@@ -177,18 +199,18 @@ def generate_pdf(fir_data, fir_id):
     ])
 
     # Row 4: Respondent Details
-    table_data.append([Paragraph("<b>Respondent Details:</b><br/>Unknown", normal_style), ""])
+    table_data.append([Paragraph(f"<b>Respondent Details:</b><br/>{fir_data.get('respondent', 'Unknown')}", normal_style), ""])
 
     # Row 5: Address (Split)
     table_data.append([
-        Paragraph("<b>Address:</b><br/>Not Provided", normal_style),
-        Paragraph("<b>Contact number:</b><br/>" + fir_data.get('email', 'Unknown'), normal_style)
+        Paragraph("<b>Address:</b><br/>" + fir_data.get('address', 'Unknown'), normal_style),
+        Paragraph("<b>Contact number:</b><br/>" + fir_data.get('contact', fir_data.get('email', 'Unknown')), normal_style)
     ])
 
     # Row 6: Height/Age
     table_data.append([
-        Paragraph("<b>Complainant Height (m):</b>", normal_style),
-        Paragraph("<b>Age:</b> 32", normal_style)
+        Paragraph("<b>Complainant Height:</b> " + fir_data.get('height', 'Unknown'), normal_style),
+        Paragraph("<b>Age:</b> " + fir_data.get('age', 'Unknown'), normal_style)
     ])
 
     # Row 7: Pen Name
@@ -209,8 +231,8 @@ def generate_pdf(fir_data, fir_id):
 
     # Row 11: Descriptive details
     table_data.append([
-        Paragraph("<b>Demographics:</b>", normal_style),
-        Paragraph("<b>Status of incident:</b>", normal_style)
+        Paragraph(f"<b>Demographics:</b> {fir_data.get('demographic', 'Unknown')}", normal_style),
+        Paragraph("<b>Status of incident:</b> Pending", normal_style)
     ])
 
     # Row 12: Complaint Title
@@ -358,8 +380,14 @@ def generate_fir():
 
         crime = detect_crime_type(english_text)
         entities = extract_entities(english_text)
-        name = entities["name"]
-        place = entities["place"]
+        name = entities.get("name", "Unknown")
+        respondent = entities.get("respondent", "Unknown")
+        place = entities.get("place", "Unknown")
+        address = entities.get("address", "Unknown")
+        contact = entities.get("contact", "Unknown")
+        age = entities.get("age", "Unknown")
+        height = entities.get("height", "Unknown")
+        demographic = entities.get("demographic", "Unknown")
 
         date_today = datetime.now().strftime("%d-%m-%Y")
 
@@ -383,7 +411,13 @@ Incident:
                 "crime_type": crime,
                 "place": place,
                 "name": name,
-                "description": english_text
+                "description": english_text,
+                "respondent": respondent,
+                "address": address,
+                "contact": contact,
+                "age": age,
+                "height": height,
+                "demographic": demographic
             },
             "translated_text": english_text
         })
@@ -407,8 +441,14 @@ def confirm_fir():
 
         crime = detect_crime_type(description)
         entities = extract_entities(description)
-        name = entities["name"]
-        place = entities["place"]
+        name = entities.get("name", "Unknown")
+        respondent = entities.get("respondent", "Unknown")
+        place = entities.get("place", "Unknown")
+        address = entities.get("address", "Unknown")
+        contact = entities.get("contact", "Unknown")
+        age = entities.get("age", "Unknown")
+        height = entities.get("height", "Unknown")
+        demographic = entities.get("demographic", "Unknown")
 
         date_today = datetime.now().strftime("%d-%m-%Y")
 
@@ -417,10 +457,16 @@ def confirm_fir():
             "email": email,
             "crime_type": crime,
             "name": name,
+            "respondent": respondent,
             "place": place,
+            "address": address,
+            "contact": contact,
+            "age": age,
+            "height": height,
+            "demographic": demographic,
             "description": description,
             "date": date_today,
-            "status": "Pending" # Defaults to Pending now
+            "status": "Pending" 
         }
 
         firs_col.insert_one(fir_record)
