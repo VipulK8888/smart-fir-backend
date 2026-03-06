@@ -597,16 +597,17 @@ def chat():
         messages = data["messages"]
         
         gemini_history = []
+        # Inject system prompt into history for `gemini-pro` compatibility
+        gemini_history.append({"role": "user", "parts": [SYSTEM_PROMPT]})
+        gemini_history.append({"role": "model", "parts": ["Understood. I will act as the TrueFile AI Police Assistant and gather the required FIR details."]})
+        
         for msg in messages[:-1]: # All except the last one
             role = "user" if msg["role"] == "user" else "model"
             gemini_history.append({"role": role, "parts": [msg["text"]]})
             
         latest_message = messages[-1]["text"]
         
-        model = genai.GenerativeModel(
-            model_name="gemini-1.5-flash",
-            system_instruction=SYSTEM_PROMPT
-        )
+        model = genai.GenerativeModel(model_name="gemini-pro")
         
         chat_session = model.start_chat(history=gemini_history)
         response = chat_session.send_message(latest_message)
