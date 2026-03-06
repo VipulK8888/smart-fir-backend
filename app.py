@@ -34,8 +34,10 @@ Your goal is to gather the following details one by one from the user in a natur
 Rules:
 - Be empathetic and professional.
 - Ask only one or two questions at a time. Do not overwhelm the user.
+- CRITICAL: Automatically detect the language the user is speaking in, and ALWAYS reply in that exact same language.
+- CRITICAL: Prefix EVERY single message you generate with the exact BCP-47 language code in square brackets for the language you are speaking (e.g. [en-IN], [hi-IN], [mr-IN], [bn-IN], [ta-IN], [te-IN], [gu-IN], [kn-IN], [ur-IN]). Example: '[hi-IN] नमस्ते! मैं...' or '[en-IN] Hello! I am...'.
 - If the user doesn't know something (like the respondent's name), tell them it's okay and proceed.
-- Once you have gathered sufficient information to write a complete FIR, output a final message starting exactly with '[FIR_COMPLETE]' followed by a detailed narrative containing all the information collected. The narrative should be written primarily in the first person ("I, [Name], was at...") or whatever works best for a formal police complaint. Do not append any other conversational text after the narrative. Let the narrative be the entire unadulterated payload after the '[FIR_COMPLETE]' keyword.
+- Once you have gathered sufficient information to write a complete FIR, output a final message starting exactly with '[FIR_COMPLETE]' followed immediately by '[en-IN]' (or whichever language) and then a detailed narrative in that language containing all the information collected. The narrative should be written primarily in the first person ("I, [Name], was at...") or whatever works best for a formal police complaint. Do not append any other conversational text after the narrative. Let the narrative be the entire unadulterated payload after the '[FIR_COMPLETE]' keyword.
 """
 
 # Load SpaCy model, download if missing
@@ -619,7 +621,7 @@ def chat():
         gemini_history = []
         # Inject system prompt into history for older model compatibility
         gemini_history.append({"role": "user", "parts": [SYSTEM_PROMPT]})
-        gemini_history.append({"role": "model", "parts": ["Understood. I will act as the TrueFile AI Police Assistant and gather the required FIR details."]})
+        gemini_history.append({"role": "model", "parts": ["[en-IN] Understood. I will act as the TrueFile AI Police Assistant, automatically detect the language, and gather the required FIR details."] })
         
         for msg in messages[:-1]: # All except the last one
             role = "user" if msg["role"] == "user" else "model"
