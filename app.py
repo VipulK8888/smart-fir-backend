@@ -180,6 +180,15 @@ def generate_pdf(fir_data, fir_id):
     normal_style = styles['Normal']
     
     # 1. Header
+    header_style = ParagraphStyle(
+        name='HeaderStyle',
+        parent=styles['Normal'],
+        alignment=0, # Left aligned
+        fontSize=12,
+        spaceAfter=15
+    )
+    elements.append(Paragraph("<b>Police Department<br/>Official FIR Report</b>", header_style))
+
     elements.append(Paragraph("<b>INCIDENT REPORT</b>", title_style))
     elements.append(Paragraph("", sub_title_style))
 
@@ -223,26 +232,7 @@ def generate_pdf(fir_data, fir_id):
     desc_para = Paragraph("<b>Incident Description:</b><br/>" + fir_data.get('description', 'No description provided.'), normal_style)
     table_data.append([desc_para, ""])
 
-    # Row 9: Complainant Information
-    table_data.append([Paragraph("<b>Complainant Information</b>", normal_style), ""])
-
-    # Row 10: Complainant Details (Duplicate section from image)
-    table_data.append([Paragraph("<b>Complainant Details:</b><br/>Sample Complaint", normal_style), ""])
-
-    # Row 11: Descriptive details
-    table_data.append([
-        Paragraph(f"<b>Demographics:</b> {fir_data.get('demographic', 'Unknown')}", normal_style),
-        Paragraph("<b>Status of incident:</b> Pending", normal_style)
-    ])
-
-    # Row 12: Complaint Title
-    table_data.append([Paragraph("<b>Complaint:</b>", normal_style), ""])
-
-    # Rows 13-14: Extras
-    table_data.append([Paragraph("<b>Extra:</b>", normal_style), "Sample Data"])
-    table_data.append([Paragraph("<b>Address:</b>", normal_style), "Sample Data"])
-    table_data.append([Paragraph("<b>Secondary Information</b>", normal_style), ""])
-    table_data.append([Paragraph("<b>Commodities:</b>", normal_style), "Sample Data"])
+    # Removed redundant Complainant Information rows here
 
 
     # Construct Table
@@ -259,24 +249,22 @@ def generate_pdf(fir_data, fir_id):
         ('SPAN', (0,1), (1,1)), # Location
         ('SPAN', (0,3), (1,3)), # Respondent
         ('SPAN', (0,7), (1,7)), # Description (make it tall)
-        ('SPAN', (0,8), (1,8)), # Complainant Information
-        ('SPAN', (0,9), (1,9)), # Complainant Details
-        ('SPAN', (0,11), (1,11)), # Complaint
-        ('SPAN', (0,14), (1,14)), # Secondary Info
         
         # Padding
         ('TOPPADDING', (0,0), (-1,-1), 6),
         ('BOTTOMPADDING', (0,0), (-1,-1), 6),
         ('LEFTPADDING', (0,0), (-1,-1), 10),
         ('RIGHTPADDING', (0,0), (-1,-1), 10),
-        
-        # Backgrounds for section headers
-        ('BACKGROUND', (0,8), (1,8), colors.lightgrey),
-        ('BACKGROUND', (0,14), (1,14), colors.lightgrey),
     ]
 
     t.setStyle(TableStyle(grid_style))
     elements.append(t)
+    
+    # 3. Footer (Signatures)
+    elements.append(Spacer(1, 40))
+    elements.append(Paragraph("Investigating Officer Signature: ______________________", normal_style))
+    elements.append(Spacer(1, 20))
+    elements.append(Paragraph("Station Seal: ______________________", normal_style))
     
     doc.build(elements, onFirstPage=add_watermark, onLaterPages=add_watermark)
     return file_name
