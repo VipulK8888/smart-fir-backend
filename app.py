@@ -181,8 +181,8 @@ def generate_pdf(fir_data, fir_id):
     
     # 1. Header
     elements.append(Paragraph("<b>INCIDENT REPORT</b>", title_style))
-    elements.append(Paragraph("Lorem ipsum dolor sit amet<br/>Innoshebrief docomartomislex axhoenshant<br/>asein.anudtinaoveniteamerittisato<br/>crfteom complemers", sub_title_style))
-    
+    elements.append(Paragraph("", sub_title_style))
+
     # 2. Main Large Table
     table_data = []
 
