@@ -2,9 +2,12 @@ import os
 import re
 from datetime import datetime
 
-from flask import Flask, request, jsonify, send_from_directory
+from flask import Flask, request, jsonify, send_from_directory, send_file, make_response
 from flask_cors import CORS, cross_origin
 from pymongo import MongoClient
+import gridfs
+from bson import ObjectId
+import io
 
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
@@ -63,7 +66,8 @@ try:
     db = client["fir_database"]
     users_col = db["users"]
     firs_col = db["confirmed_firs"]
-    print("Successfully connected to MongoDB.")
+    fs = gridfs.GridFS(db)
+    print("Successfully connected to MongoDB and GridFS.")
 except Exception as e:
     print(f"Failed to connect to MongoDB: {e}")
 
@@ -443,12 +447,26 @@ Incident:
 @app.route('/confirm_fir', methods=['POST'])
 def confirm_fir():
     try:
-        data = request.get_json()
-        if not data or "description" not in data:
+        # Support both JSON (original) and Form Data (with file)
+        if request.is_json:
+            data = request.get_json()
+            description = data.get("description")
+            email = data.get("email", "guest")
+        else:
+            description = request.form.get("description")
+            email = request.form.get("email", "guest")
+            
+        if not description:
              return jsonify({"status": "error", "message": "Missing description"}), 400
 
-        description = data["description"]
-        email = data.get("email", "guest")
+        # Optional Evidence Processing
+        evidence_id = None
+        if 'evidence' in request.files:
+            file = request.files['evidence']
+            if file and file.filename != '':
+                # Save binary to GridFS
+                evidence_id = fs.put(file, filename=file.filename, content_type=file.content_type)
+                evidence_id = str(evidence_id)
 
         fir_id = generate_fir_id()
 
@@ -478,6 +496,7 @@ def confirm_fir():
             "height": height,
             "demographic": demographic,
             "description": description,
+            "evidence_id": evidence_id,
             "date": date_today,
             "status": "Pending" 
         }
@@ -553,6 +572,24 @@ def get_fir(fir_id):
         return jsonify({"status": "error", "message": "unfound"}), 404
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
+
+# ==================================================
+# 📷 SERVE EVIDENCE FILE (GRIDFS)
+# ==================================================
+@app.route('/evidence/<evidence_id>')
+def serve_evidence(evidence_id):
+    try:
+        if not evidence_id or evidence_id == "None":
+            return "No evidence attached", 404
+            
+        file_data = fs.get(ObjectId(evidence_id))
+        response = make_response(file_data.read())
+        response.headers.set('Content-Type', file_data.content_type)
+        response.headers.set('Content-Disposition', 'inline', filename=file_data.filename)
+        return response
+    except Exception as e:
+        print(f"Error serving evidence {evidence_id}: {e}")
+        return "Evidence not found", 404
 
 # ==================================================
 # 📥 SERVE OR REGENERATE PDF
@@ -639,8 +676,14 @@ def chat():
             "reply": response.text
         })
     except Exception as e:
-        print("Chat Error:", e)
-        return jsonify({"status": "error", "message": f"Server Error: {str(e)}"}), 500
+        error_str = str(e)
+        print(f"Chat Error: {error_str}")
+        if "429" in error_str or "quota" in error_str.lower() or "limit" in error_str.lower():
+            return jsonify({
+                "status": "error", 
+                "message": "AI Rate Limit Exceeded: You are talking too fast and hit the free API limit! Please wait 10 seconds and try your message again."
+            }), 429
+        return jsonify({"status": "error", "message": f"Server Error: {error_str}"}), 500
 
 # ==================================================
 # 🏠 HOME
