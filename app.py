@@ -600,7 +600,7 @@ def serve_pdf(filename):
     try:
         # Check if the file exists locally first
         if os.path.exists(os.path.join("pdfs", filename)):
-            return send_from_directory('pdfs', filename)
+            return send_from_directory('pdfs', filename, as_attachment=True)
             
         # If it doesn't exist (due to server restart), regenerate it from MongoDB
         fir_id = filename.replace(".pdf", "")
@@ -614,7 +614,7 @@ def serve_pdf(filename):
         
         # Serve the newly generated file
         if os.path.exists(os.path.join("pdfs", filename)):
-            return send_from_directory('pdfs', filename)
+            return send_from_directory('pdfs', filename, as_attachment=True)
         else:
             return jsonify({"status": "error", "message": "Failed to generate PDF on the fly"}), 500
             
