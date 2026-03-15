@@ -574,6 +574,109 @@ def get_fir(fir_id):
         return jsonify({"status": "error", "message": str(e)}), 500
 
 # ==================================================
+# 🧠 GEMINI DOCUMENT VERIFICATION HELPER
+# ==================================================
+def verify_document_with_gemini(image_bytes, document_type):
+    """Sends image bytes to Gemini and asks if it's a valid Indian document."""
+    try:
+        if not GEMINI_API_KEY:
+            return False, "Gemini API not configured"
+        model = genai.GenerativeModel("gemini-1.5-flash")
+        import base64
+        b64_image = base64.b64encode(image_bytes).decode("utf-8")
+        prompt = (
+            f"Does this image appear to be a valid Indian {document_type}? "
+            f"Check for typical layout, field labels, and structure of a real Indian {document_type}. "
+            f"Reply ONLY with YES or NO and nothing else."
+        )
+        response = model.generate_content([
+            {"mime_type": "image/jpeg", "data": b64_image},
+            prompt
+        ])
+        answer = response.text.strip().upper() if response.text else "NO"
+        return answer.startswith("YES"), None
+    except Exception as e:
+        print(f"Gemini doc verification error: {e}")
+        return False, str(e)
+
+# ==================================================
+# 👤 SAVE / UPDATE USER PROFILE
+# ==================================================
+@app.route('/save_profile', methods=['POST'])
+@cross_origin()
+def save_profile():
+    try:
+        email = request.form.get("email", "").strip()
+        if not email:
+            return jsonify({"status": "error", "message": "Email is required"}), 400
+
+        name = request.form.get("name", "")
+        dob = request.form.get("dob", "")
+        phone = request.form.get("phone", "")
+
+        update_doc = {
+            "name": name,
+            "dob": dob,
+            "phone": phone,
+        }
+
+        # --- Process Aadhaar Image ---
+        if "aadhaar_image" in request.files:
+            aadhaar_file = request.files["aadhaar_image"]
+            aadhaar_bytes = aadhaar_file.read()
+            # Delete old Aadhaar from GridFS if it exists
+            existing = users_col.find_one({"email": email}, {"aadhaar_id": 1})
+            if existing and existing.get("aadhaar_id"):
+                try:
+                    fs.delete(ObjectId(existing["aadhaar_id"]))
+                except Exception:
+                    pass
+            aadhaar_id = fs.put(aadhaar_bytes, filename=aadhaar_file.filename, content_type=aadhaar_file.content_type or "image/jpeg")
+            verified, _ = verify_document_with_gemini(aadhaar_bytes, "Aadhaar Card")
+            update_doc["aadhaar_id"] = str(aadhaar_id)
+            update_doc["aadhaar_verified"] = verified
+
+        # --- Process PAN Image ---
+        if "pan_image" in request.files:
+            pan_file = request.files["pan_image"]
+            pan_bytes = pan_file.read()
+            # Delete old PAN from GridFS if it exists
+            existing = existing if 'existing' in locals() else users_col.find_one({"email": email}, {"pan_id": 1})
+            if existing and existing.get("pan_id"):
+                try:
+                    fs.delete(ObjectId(existing["pan_id"]))
+                except Exception:
+                    pass
+            pan_id = fs.put(pan_bytes, filename=pan_file.filename, content_type=pan_file.content_type or "image/jpeg")
+            verified, _ = verify_document_with_gemini(pan_bytes, "PAN Card")
+            update_doc["pan_id"] = str(pan_id)
+            update_doc["pan_verified"] = verified
+
+        users_col.update_one({"email": email}, {"$set": update_doc}, upsert=True)
+
+        # Re-fetch to return fresh status
+        profile = users_col.find_one({"email": email}, {"_id": 0, "password": 0})
+        return jsonify({"status": "success", "profile": profile})
+
+    except Exception as e:
+        print(f"save_profile error: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+# ==================================================
+# 👤 GET USER PROFILE
+# ==================================================
+@app.route('/get_profile/<email>')
+@cross_origin()
+def get_profile(email):
+    try:
+        profile = users_col.find_one({"email": email}, {"_id": 0, "password": 0})
+        if profile:
+            return jsonify({"status": "success", "profile": profile})
+        return jsonify({"status": "not_found", "profile": {}})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+# ==================================================
 # 📷 SERVE EVIDENCE FILE (GRIDFS)
 # ==================================================
 @app.route('/evidence/<evidence_id>')
