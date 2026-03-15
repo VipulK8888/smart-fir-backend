@@ -8,5 +8,6 @@ google-generativeai==0.8.2
 Pillow==10.3.0 
 opencv-python-headless==4.9.0.80 
 numpy==1.26.4
+python-dateutil==2.8.2
 https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.7.1/en_core_web_sm-3.7.1.tar.gz
 gunicorn
