@@ -644,123 +644,91 @@ def preprocess_document_image(image_bytes):
         print(f"Preprocess error: {e}")
         return None, None, (0, 0)
 
-def extract_text_with_gemini(image_bytes):
+def extract_text_with# ── STAGE 2: AI ANALYST (Gemini Vision) ─────────────────────────
+import json
+
+def verify_document_with_ai(image_bytes, document_type):
     """
-    Uses Gemini Vision as the OCR engine.
+    Powerful AI Analyst:
+    - Sends original image to Gemini 1.5 Flash.
+    - Asks for structured JSON analysis.
+    - Handles extraction and validation in one unified step.
     """
     if not GEMINI_API_KEY:
-        return ""
+        return False, "Gemini API key not found", ""
+
+    print(f"  [AI Analyst] Analyzing {document_type}...")
     try:
         model = genai.GenerativeModel("gemini-1.5-flash")
-        ocr_prompt = (
-            "You are an OCR engine. Extract ALL visible text from this document image EXACTLY as it appears. "
-            "Output RAW TEXT ONLY. Include names, numbers, dates, and labels."
+        
+        prompt = (
+            f"You are an expert Indian Document Analyst. Analyze this image of an Indian {document_type}.\n"
+            "1. Is this a valid, authentic, and clear image of the requested document type?\n"
+            "2. Extract the full Name, Date of Birth (DD/MM/YYYY), and Document Number.\n"
+            "3. If it's a photo of a screen, a blurry mess, or the wrong document, set is_valid to false.\n\n"
+            "Return ONLY a raw JSON strictly in this format (no markdown code blocks):\n"
+            "{\"is_valid\": bool, \"name\": \"string\", \"dob\": \"DD/MM/YYYY\", \"number\": \"string\", \"reason\": \"string\"}"
         )
-        b64 = base64.b64encode(image_bytes).decode("utf-8")
-        image_part = {"inline_data": {"mime_type": "image/jpeg", "data": b64}}
-        response = model.generate_content([image_part, ocr_prompt])
-        return response.text.strip() if response.text else ""
-    except Exception as e:
-        print(f"Gemini OCR error: {e}")
-        return ""
+        
+        b64_image = base64.b64encode(image_bytes).decode("utf-8")
+        image_part = {"inline_data": {"mime_type": "image/jpeg", "data": b64_image}}
+        
+        response = model.generate_content([image_part, prompt])
+        raw_json = response.text.strip()
+        
+        # Clean markdown if AI included it
+        if "```json" in raw_json:
+            raw_json = raw_json.split("```json")[1].split("```")[0].strip()
+        elif "```" in raw_json:
+            raw_json = raw_json.split("```")[1].split("```")[0].strip()
 
-def run_fraud_checks(original_img):
-    """
-    Basic quality checks via OpenCV.
-    """
-    if original_img is None:
-        return True, "Check skipped"
-    
-    gray = cv2.cvtColor(original_img, cv2.COLOR_BGR2GRAY)
-    laplacian_var = cv2.Laplacian(gray, cv2.CV_64F).var()
-    if laplacian_var < 60:
-        return False, f"Image too blurry (score: {laplacian_var:.0f}). Please take a clearer photo."
-    
-    return True, "Quality OK"
+        print(f"  [AI Analyst] Raw Response: {raw_json}")
+        data = json.loads(raw_json)
+        
+        is_valid = data.get("is_valid", False)
+        reason = data.get("reason", "Unknown reason")
+        dob = data.get("dob", "")
+        
+        # Standardize DOB
+        dob = _normalize_dob(dob)
+        
+        if is_valid:
+            print(f"  ✅ [AI Analyst] Passed: {data.get('number')} | DOB: {dob}")
+            return True, f"Verified: {data.get('number')}", dob
+        else:
+            print(f"  ❌ [AI Analyst] Failed: {reason}")
+            return False, f"Invalid: {reason}", ""
+
+    except Exception as e:
+        print(f"  ⚠️ [AI Analyst] Error: {e}")
+        return False, f"Analysis Error: {str(e)}", ""
+
 
 def verify_document_with_gemini(image_bytes, document_type, filename="document.jpg"):
     """
-    Enhanced Document Verification Pipeline using Gemini Vision + OpenCV Preprocessing.
+    Main entry point for verification.
     """
-    print(f"🔍 [Pipeline] Verifying {document_type} ({filename})...")
-    
-    # --- STAGE 1: READ / PREPROCESS ---
-    # We still use this to check for blur/size via the original_cv result
-    thresh, original_cv, dims = preprocess_document_image(image_bytes)
+    # Stage 1: Basic Preprocessing for quality check
+    _, original_cv, _ = preprocess_document_image(image_bytes)
     if original_cv is None:
-        return False, "⚠️ Could not read the image file. Please upload a clear photo (JPG/PNG).", ""
-
-    # --- STAGE 2: QUALITY CHECKS ---
+        return False, "Could not decode image", ""
+        
     quality_ok, quality_msg = run_fraud_checks(original_cv)
     if not quality_ok:
-        print(f"  [Quality Fail] {quality_msg}")
-        return False, f"⚠️ {quality_msg}", ""
+        return False, quality_msg, ""
 
-    # --- STAGE 3: GEMINI OCR ---
-    # Important: We send the ORIGINAL bytes to Gemini for better context/accuracy
-    extracted_text = extract_text_with_gemini(image_bytes)
-    if not extracted_text:
-        return False, "⚠️ No text could be detected in the document. Please ensure good lighting and try again.", ""
-
-    # --- STAGE 4: VALIDATION LOGIC ---
-    is_valid = False
-    reason = ""
-    extracted_dob = ""
-    text_upper = extracted_text.upper()
-
-    # Generic DOB Extraction
-    dob_regex = re.compile(r'(\d{2}[/\-\.]\d{2}[/\-\.]\d{4}|\d{4}[/\-\.]\d{2}[/\-\.]\d{2})')
-    dob_match = dob_regex.search(extracted_text)
-    if dob_match:
-        extracted_dob = _normalize_dob(dob_match.group())
-
-    if "Aadhaar" in document_type:
-        # Robust Aadhaar feature checking
-        has_num = bool(re.search(r'\d{4}\s\d{4}\s\d{4}|\d{12}|[Xx]{4}\s*[Xx]{4}\s*\d{4}', extracted_text))
-        has_uidai = any(m in text_upper for m in ['AADHAAR', 'AADHAR', 'UIDAI', 'आधार', 'UNIQUE IDENTIFICATION'])
-        has_gov = any(m in text_upper for m in ['GOVT OF INDIA', 'GOVERNMENT OF INDIA', 'भारत सरकार'])
-        has_gender = any(m in text_upper for m in ['MALE', 'FEMALE', 'पुरुष', 'महिला'])
-        
-        # Scoring: (Needs 10+ to pass)
-        score = (has_num * 10) + (has_uidai * 5) + (has_gov * 5) + (has_gender * 3)
-        print(f"  [Aadhaar Score] {score} | num:{has_num}, uidai:{has_uidai}, gov:{has_gov}, gender:{has_gender}")
-        
-        if score >= 10:
-            is_valid = True
-            reason = f"Aadhaar card verified (detected features: {score}/23)"
-        else:
-            reason = "Document not recognized as a valid Aadhaar card. Please upload a clear, front-side photo."
-
-    else: # PAN Card
-        # Flexible PAN Number (handles common OCR typo O vs 0)
-        # Standard: 5 Letters, 4 Digits, 1 Letter
-        pan_regex = re.compile(r'[A-Z]{5}[0-9O]{4}[A-Z]')
-        has_pan_num = bool(pan_regex.search(text_upper))
-        has_income_tax = any(m in text_upper for m in ['INCOME TAX', 'आयकर', 'PERMANENT ACCOUNT'])
-        has_gov = any(m in text_upper for m in ['GOVT OF INDIA', 'INDIA', 'भारत'])
-
-        score = (has_pan_num * 10) + (has_income_tax * 5) + (has_gov * 5)
-        print(f"  [PAN Score] {score} | num:{has_pan_num}, tax:{has_income_tax}, gov:{has_gov}")
-
-        if score >= 10:
-            is_valid = True
-            reason = f"PAN card verified (detected features: {score}/20)"
-        else:
-            reason = "Document not recognized as a valid PAN card. Please upload a clear photo showing the PAN number."
-
-    print(f"  [Final Result] {is_valid} | DOB: {extracted_dob}")
-    return is_valid, reason, extracted_dob
+    # Stage 2: AI Analyst
+    return verify_document_with_ai(image_bytes, document_type)
 
 
 # ==================================================
-
 # 👤 SAVE / UPDATE USER PROFILE
 # ==================================================
 @app.route('/save_profile', methods=['POST'])
 @cross_origin()
 def save_profile():
     try:
-        email = request.form.get("email", "").strip()
+        email = request.form.get("email", "").strip().lower()
         if not email:
             return jsonify({"status": "error", "message": "Email is required"}), 400
 
@@ -768,75 +736,74 @@ def save_profile():
         dob = request.form.get("dob", "")
         phone = request.form.get("phone", "")
 
+        # Fetch existing profile to preserve data
+        existing_profile = users_col.find_one({"email": email}) or {}
+        
         update_doc = {
-            "name": name,
-            "dob": dob,
-            "phone": phone,
+            "name": name or existing_profile.get("name", ""),
+            "dob": dob or existing_profile.get("dob", ""),
+            "phone": phone or existing_profile.get("phone", ""),
         }
 
         # --- Process Aadhaar Image ---
-        aadhaar_dob = ""
+        aadhaar_dob = existing_profile.get("aadhaar_dob", "")
         if "aadhaar_image" in request.files:
             aadhaar_file = request.files["aadhaar_image"]
             aadhaar_bytes = aadhaar_file.read()
-            # Delete old Aadhaar from GridFS if it exists
-            existing = users_col.find_one({"email": email}, {"aadhaar_id": 1})
-            if existing and existing.get("aadhaar_id"):
-                try:
-                    fs.delete(ObjectId(existing["aadhaar_id"]))
-                except Exception:
-                    pass
-            aadhaar_id = fs.put(aadhaar_bytes, filename=aadhaar_file.filename, content_type=aadhaar_file.content_type or "image/jpeg")
-            aadhaar_verified, _, aadhaar_dob = verify_document_with_gemini(aadhaar_bytes, "Aadhaar Card", filename=aadhaar_file.filename or "aadhaar.jpg")
+            
+            # Clean old file
+            if existing_profile.get("aadhaar_id"):
+                try: fs.delete(ObjectId(existing_profile["aadhaar_id"]))
+                except: pass
+                
+            aadhaar_id = fs.put(aadhaar_bytes, filename="aadhaar.jpg", content_type="image/jpeg")
+            aadhaar_verified, _, aadhaar_dob = verify_document_with_gemini(aadhaar_bytes, "Aadhaar Card")
+            
             update_doc["aadhaar_id"] = str(aadhaar_id)
             update_doc["aadhaar_verified"] = aadhaar_verified
-            if aadhaar_dob:
-                update_doc["aadhaar_dob"] = aadhaar_dob
+            update_doc["aadhaar_dob"] = aadhaar_dob
 
         # --- Process PAN Image ---
-        pan_dob = ""
+        pan_dob = existing_profile.get("pan_dob", "")
         if "pan_image" in request.files:
             pan_file = request.files["pan_image"]
             pan_bytes = pan_file.read()
-            # Delete old PAN from GridFS if it exists
-            existing = existing if 'existing' in locals() else users_col.find_one({"email": email}, {"pan_id": 1})
-            if existing and existing.get("pan_id"):
-                try:
-                    fs.delete(ObjectId(existing["pan_id"]))
-                except Exception:
-                    pass
-            pan_id = fs.put(pan_bytes, filename=pan_file.filename, content_type=pan_file.content_type or "image/jpeg")
-            pan_verified, _, pan_dob = verify_document_with_gemini(pan_bytes, "PAN Card", filename=pan_file.filename or "pan.jpg")
+            
+            # Clean old file
+            if existing_profile.get("pan_id"):
+                try: fs.delete(ObjectId(existing_profile["pan_id"]))
+                except: pass
+                
+            pan_id = fs.put(pan_bytes, filename="pan.jpg", content_type="image/jpeg")
+            pan_verified, _, pan_dob = verify_document_with_gemini(pan_bytes, "PAN Card")
+            
             update_doc["pan_id"] = str(pan_id)
             update_doc["pan_verified"] = pan_verified
-            if pan_dob:
-                update_doc["pan_dob"] = pan_dob
+            update_doc["pan_dob"] = pan_dob
 
         # ---- Cross-Document DOB Matching ----
-        # Only compare when BOTH documents were uploaded in this request
-        if aadhaar_dob and pan_dob:
-            if aadhaar_dob != pan_dob:
-                print(f"❌ DOB Mismatch! Aadhaar DOB: '{aadhaar_dob}' vs PAN DOB: '{pan_dob}'")
-                # Both documents fail — they belong to different people
+        # If we have both DOBs (either from this request or pre-existing)
+        final_aadhaar_dob = update_doc.get("aadhaar_dob", existing_profile.get("aadhaar_dob", ""))
+        final_pan_dob     = update_doc.get("pan_dob",     existing_profile.get("pan_dob", ""))
+        
+        if final_aadhaar_dob and final_pan_dob:
+            if final_aadhaar_dob != final_pan_dob:
+                print(f"❌ DOB Mismatch! '{final_aadhaar_dob}' vs '{final_pan_dob}'")
                 update_doc["aadhaar_verified"] = False
                 update_doc["pan_verified"] = False
-                update_doc["verification_failure_reason"] = (
-                    f"DOB mismatch detected: Aadhaar shows '{aadhaar_dob}' but PAN shows '{pan_dob}'. "
-                    "Both documents must belong to the same person."
-                )
+                update_doc["verification_failure_reason"] = f"DOB mismatch: Aadhaar ({final_aadhaar_dob}) != PAN ({final_pan_dob})."
             else:
-                print(f"✅ DOB Match confirmed: {aadhaar_dob}")
+                print(f"✅ DOB Match: {final_aadhaar_dob}")
                 update_doc["verification_failure_reason"] = None
 
         users_col.update_one({"email": email}, {"$set": update_doc}, upsert=True)
-
-        # Re-fetch to return fresh status
         profile = users_col.find_one({"email": email}, {"_id": 0, "password": 0})
         return jsonify({"status": "success", "profile": profile})
 
     except Exception as e:
         print(f"save_profile error: {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
+
 
 # ==================================================
 # 👤 GET USER PROFILE
