@@ -647,6 +647,20 @@ def preprocess_document_image(image_bytes):
 # ── STAGE 2: AI ANALYST (Gemini Vision) ─────────────────────────
 import json
 
+def run_fraud_checks(original_img):
+    """
+    Basic quality checks via OpenCV.
+    """
+    if original_img is None:
+        return True, "Check skipped"
+    
+    gray = cv2.cvtColor(original_img, cv2.COLOR_BGR2GRAY)
+    laplacian_var = cv2.Laplacian(gray, cv2.CV_64F).var()
+    if laplacian_var < 60:
+        return False, f"Image too blurry (score: {laplacian_var:.0f}). Please take a clearer photo."
+    
+    return True, "Quality OK"
+
 def verify_document_with_ai(image_bytes, document_type):
     """
     Powerful AI Analyst:
