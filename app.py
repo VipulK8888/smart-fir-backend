@@ -644,7 +644,7 @@ def preprocess_document_image(image_bytes):
         print(f"Preprocess error: {e}")
         return None, None, (0, 0)
 
-def extract_text_with# ── STAGE 2: AI ANALYST (Gemini Vision) ─────────────────────────
+# ── STAGE 2: AI ANALYST (Gemini Vision) ─────────────────────────
 import json
 
 def verify_document_with_ai(image_bytes, document_type):
