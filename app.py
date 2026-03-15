@@ -585,23 +585,25 @@ import numpy as np
 from PIL import Image, ImageEnhance
 
 def _normalize_dob(dob_str):
-    """Normalizes any date string to DD/MM/YYYY for consistent comparison."""
+    """Normalizes any date string (including those with month names) to DD/MM/YYYY."""
     if not dob_str:
         return ""
-    # Clean string
-    dob_str = dob_str.strip().replace("-", "/").replace(".", "/")
     
-    # Try YYYY/MM/DD -> DD/MM/YYYY
-    match = re.match(r'(\d{4})/(\d{2})/(\d{2})', dob_str)
-    if match:
-        return f"{match.group(3)}/{match.group(2)}/{match.group(1)}"
-    
-    # Already DD/MM/YYYY
-    match = re.match(r'(\d{2})/(\d{2})/(\d{4})', dob_str)
-    if match:
+    import dateutil.parser as dparser
+    try:
+        # Use dateutil to handle almost any format (15 May 1995, 1995-05-15, etc.)
+        parsed_date = dparser.parse(dob_str, dayfirst=True)
+        return parsed_date.strftime("%d/%m/%Y")
+    except Exception:
+        # Fallback to manual cleaning if dateutil fails
+        dob_str = dob_str.strip().replace("-", "/").replace(".", "/")
+        match = re.search(r'(\d{1,2})/(\d{1,2})/(\d{4})', dob_str)
+        if match:
+            day = match.group(1).zfill(2)
+            month = match.group(2).zfill(2)
+            year = match.group(3)
+            return f"{day}/{month}/{year}"
         return dob_str
-    
-    return dob_str
 
 def preprocess_document_image(image_bytes):
     """
@@ -656,7 +658,8 @@ def run_fraud_checks(original_img):
     
     gray = cv2.cvtColor(original_img, cv2.COLOR_BGR2GRAY)
     laplacian_var = cv2.Laplacian(gray, cv2.CV_64F).var()
-    if laplacian_var < 60:
+    # Lowered threshold from 60 to 40 to be more lenient with non-professional photos
+    if laplacian_var < 40:
         return False, f"Image too blurry (score: {laplacian_var:.0f}). Please take a clearer photo."
     
     return True, "Quality OK"
@@ -677,10 +680,12 @@ def verify_document_with_ai(image_bytes, document_type):
         
         prompt = (
             f"You are an expert Indian Document Analyst. Analyze this image of an Indian {document_type}.\n"
-            "1. Is this a valid, authentic, and clear image of the requested document type?\n"
-            "2. Extract the full Name, Date of Birth (DD/MM/YYYY), and Document Number.\n"
-            "3. If it's a photo of a screen, a blurry mess, or the wrong document, set is_valid to false.\n\n"
-            "Return ONLY a raw JSON strictly in this format (no markdown code blocks):\n"
+            "INSTRUCTIONS:\n"
+            "- A little background or clutter around the card is PERFECTLY OK. Find the document in the frame.\n"
+            "- Extract: Full Name, Date of Birth (standardized to DD/MM/YYYY), and Document Number.\n"
+            "- Be lenient with 'authenticity' if it's a real photo (ignore shadows or slight angles).\n"
+            "- Return REASON only if it's definitely the wrong document (e.g., a photo of a tree) or completely unreadable.\n\n"
+            "Return ONLY a raw JSON strictly in this format:\n"
             "{\"is_valid\": bool, \"name\": \"string\", \"dob\": \"DD/MM/YYYY\", \"number\": \"string\", \"reason\": \"string\"}"
         )
         
