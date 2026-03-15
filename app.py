@@ -680,69 +680,76 @@ def run_fraud_checks(original_img):
 
 def verify_document_with_gemini(image_bytes, document_type, filename="document.jpg"):
     """
-    Main verification pipeline.
+    Enhanced Document Verification Pipeline using Gemini Vision + OpenCV Preprocessing.
     """
-    print(f"🔍 Verifying {document_type}...")
+    print(f"🔍 [Pipeline] Verifying {document_type} ({filename})...")
     
-    # Stage 1: Preprocess to check image validity
+    # --- STAGE 1: READ / PREPROCESS ---
+    # We still use this to check for blur/size via the original_cv result
     thresh, original_cv, dims = preprocess_document_image(image_bytes)
     if original_cv is None:
-        return False, "Could not read image file", ""
+        return False, "⚠️ Could not read the image file. Please upload a clear photo (JPG/PNG).", ""
 
-    # Stage 2: Quality/Fraud Checks
+    # --- STAGE 2: QUALITY CHECKS ---
     quality_ok, quality_msg = run_fraud_checks(original_cv)
     if not quality_ok:
-        return False, quality_msg, ""
+        print(f"  [Quality Fail] {quality_msg}")
+        return False, f"⚠️ {quality_msg}", ""
 
-    # Stage 3: OCR
+    # --- STAGE 3: GEMINI OCR ---
+    # Important: We send the ORIGINAL bytes to Gemini for better context/accuracy
     extracted_text = extract_text_with_gemini(image_bytes)
     if not extracted_text:
-        return False, "Could not extract text from document", ""
+        return False, "⚠️ No text could be detected in the document. Please ensure good lighting and try again.", ""
 
-    # Stage 4: Regex Validation
+    # --- STAGE 4: VALIDATION LOGIC ---
     is_valid = False
     reason = ""
     extracted_dob = ""
     text_upper = extracted_text.upper()
 
+    # Generic DOB Extraction
     dob_regex = re.compile(r'(\d{2}[/\-\.]\d{2}[/\-\.]\d{4}|\d{4}[/\-\.]\d{2}[/\-\.]\d{2})')
     dob_match = dob_regex.search(extracted_text)
     if dob_match:
         extracted_dob = _normalize_dob(dob_match.group())
 
     if "Aadhaar" in document_type:
+        # Robust Aadhaar feature checking
         has_num = bool(re.search(r'\d{4}\s\d{4}\s\d{4}|\d{12}|[Xx]{4}\s*[Xx]{4}\s*\d{4}', extracted_text))
-        has_uidai = any(m in text_upper for m in ['AADHAAR', 'AADHAR', 'UIDAI', 'आधार'])
+        has_uidai = any(m in text_upper for m in ['AADHAAR', 'AADHAR', 'UIDAI', 'आधार', 'UNIQUE IDENTIFICATION'])
+        has_gov = any(m in text_upper for m in ['GOVT OF INDIA', 'GOVERNMENT OF INDIA', 'भारत सरकार'])
+        has_gender = any(m in text_upper for m in ['MALE', 'FEMALE', 'पुरुष', 'महिला'])
         
-        score = (has_num * 5 + has_uidai * 5)
-        if score >= 5:
+        # Scoring: (Needs 10+ to pass)
+        score = (has_num * 10) + (has_uidai * 5) + (has_gov * 5) + (has_gender * 3)
+        print(f"  [Aadhaar Score] {score} | num:{has_num}, uidai:{has_uidai}, gov:{has_gov}, gender:{has_gender}")
+        
+        if score >= 10:
             is_valid = True
-            reason = f"Aadhaar verified (score {score}/10)"
+            reason = f"Aadhaar card verified (detected features: {score}/23)"
         else:
-            reason = "Document does not look like a valid Aadhaar card"
-    else:
-        pan_regex = re.compile(r'[A-Z]{5}[0-9]{4}[A-Z]')
-        if pan_regex.search(text_upper):
-            is_valid = True
-            reason = f"PAN verified"
-        else:
-            reason = "No valid PAN number found"
+            reason = "Document not recognized as a valid Aadhaar card. Please upload a clear, front-side photo."
 
+    else: # PAN Card
+        # Flexible PAN Number (handles common OCR typo O vs 0)
+        # Standard: 5 Letters, 4 Digits, 1 Letter
+        pan_regex = re.compile(r'[A-Z]{5}[0-9O]{4}[A-Z]')
+        has_pan_num = bool(pan_regex.search(text_upper))
+        has_income_tax = any(m in text_upper for m in ['INCOME TAX', 'आयकर', 'PERMANENT ACCOUNT'])
+        has_gov = any(m in text_upper for m in ['GOVT OF INDIA', 'INDIA', 'भारत'])
+
+        score = (has_pan_num * 10) + (has_income_tax * 5) + (has_gov * 5)
+        print(f"  [PAN Score] {score} | num:{has_pan_num}, tax:{has_income_tax}, gov:{has_gov}")
+
+        if score >= 10:
+            is_valid = True
+            reason = f"PAN card verified (detected features: {score}/20)"
+        else:
+            reason = "Document not recognized as a valid PAN card. Please upload a clear photo showing the PAN number."
+
+    print(f"  [Final Result] {is_valid} | DOB: {extracted_dob}")
     return is_valid, reason, extracted_dob
-
-    if is_valid_format:
-        final_result = True
-        final_reason = format_reason
-        if fraud_warning:
-            final_reason += f" | {fraud_warning}"
-        print(f"✅ VERIFIED: {document_type} | {final_reason}")
-    else:
-        final_result = False
-        final_reason = format_reason
-        print(f"❌ NOT VERIFIED: {document_type} | {final_reason}")
-
-    print(f"{'='*50}\n")
-    return final_result, final_reason, extracted_dob
 
 
 # ==================================================
