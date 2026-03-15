@@ -5,6 +5,7 @@ reportlab==4.1.0
 deep-translator==1.11.4
 spacy
 google-generativeai==0.8.2
+Pillow==10.3.0
 https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.7.1/en_core_web_sm-3.7.1.tar.gz
 gunicorn
 
