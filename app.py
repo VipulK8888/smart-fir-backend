@@ -8,6 +8,10 @@ from pymongo import MongoClient
 import gridfs
 from bson import ObjectId
 import io
+import base64
+
+# Image processing for document verification pipeline
+from PIL import Image, ImageEnhance, ImageFilter
 
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
@@ -593,138 +597,236 @@ def _normalize_dob(dob_str):
         return dob_str
     return dob_str
 
-def verify_document_with_gemini(image_bytes, document_type, filename="document.jpg"):
+# ==================================================
+# 📷 STAGE 1 — IMAGE PREPROCESSING (Pillow)
+# ==================================================
+def preprocess_document_image(image_bytes):
     """
-    Two-strategy document verification:
-    - Aadhaar: Holistic visual classification by Gemini (robust for masked numbers)
-    - PAN: OCR extraction + strict regex (PAN number is always fully visible)
-    Returns: (is_valid: bool, reason: str, extracted_dob: str)
+    Enhances image quality before OCR:
+    - Auto-rotates if EXIF orientation present
+    - Upscales small images to minimum 1200px wide
+    - Boosts contrast and sharpness for better text recognition
+    - Converts to RGB JPEG at high quality
+    Returns: preprocessed image bytes
     """
     try:
-        if not GEMINI_API_KEY:
-            return False, "Gemini API key not configured", ""
+        img = Image.open(io.BytesIO(image_bytes))
 
-        import base64
-        ext = filename.lower().rsplit('.', 1)[-1] if '.' in filename else 'jpg'
-        mime_map = {
-            'jpg': 'image/jpeg', 'jpeg': 'image/jpeg', 'png': 'image/png',
-            'webp': 'image/webp', 'heic': 'image/heic', 'heif': 'image/heic'
-        }
-        mime_type = mime_map.get(ext, 'image/jpeg')
+        # Auto-rotate based on EXIF orientation
+        try:
+            from PIL import ExifTags
+            for orientation in ExifTags.TAGS.keys():
+                if ExifTags.TAGS[orientation] == 'Orientation':
+                    break
+            exif = img._getexif()
+            if exif and orientation in exif:
+                rot_map = {3: 180, 6: 270, 8: 90}
+                if exif[orientation] in rot_map:
+                    img = img.rotate(rot_map[exif[orientation]], expand=True)
+        except Exception:
+            pass  # No EXIF data, continue
 
-        model = genai.GenerativeModel("gemini-1.5-flash")
-        b64_image = base64.b64encode(image_bytes).decode("utf-8")
-        image_part = {
-            "inline_data": {
-                "mime_type": mime_type,
-                "data": b64_image
-            }
-        }
+        # Convert to RGB (handles PNG with alpha, HEIC, etc.)
+        if img.mode != 'RGB':
+            img = img.convert('RGB')
 
-        extracted_dob = ""
+        # Upscale if image is too small (min 1200px on longest side)
+        w, h = img.size
+        longest = max(w, h)
+        if longest < 1200:
+            scale = 1200 / longest
+            img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
+            print(f"  [Preprocess] Upscaled {w}x{h} → {img.size}")
 
-        # ============================================================
-        # STRATEGY A: AADHAAR — Holistic visual classification
-        # (Aadhaar numbers are often masked; rely on ALL visible features)
-        # ============================================================
-        if "Aadhaar" in document_type:
-            prompt = (
-                "You are a document verification AI. Examine this image carefully.\n"
-                "Determine if this is an Indian Aadhaar Card issued by UIDAI.\n\n"
-                "Look for ANY of these features:\n"
-                "- Person's name in English or Hindi\n"
-                "- Date of Birth (DOB or जन्म तिथि)\n"
-                "- Gender (Male/Female/पुरुष/महिला)\n"
-                "- A 12-digit number (may be fully or partially masked as XXXX XXXX XXXX)\n"
-                "- QR code\n"
-                "- Text: 'Aadhaar', 'आधार', 'UIDAI', or 'Government of India'\n"
-                "- Blue/orange coloured Aadhaar logo\n\n"
-                "IMPORTANT: Even if only the photo+name+DOB side is shown (number on the other side), "
-                "it IS still a valid Aadhaar card if name, DOB, and gender are visible.\n\n"
-                "Respond in EXACTLY this format:\n"
-                "VALID|<extracted_dob_if_visible_else_NONE>\n"
-                "or\n"
-                "INVALID|<brief_reason>\n\n"
-                "Examples:\n"
-                "VALID|08/08/2005\n"
-                "VALID|NONE\n"
-                "INVALID|This appears to be a driving license, not Aadhaar"
-            )
+        # Enhance contrast (1.4x) for clearer text
+        img = ImageEnhance.Contrast(img).enhance(1.4)
 
-            response = model.generate_content([image_part, prompt])
-            raw = response.text.strip() if response.text else "INVALID|No response"
-            print(f"Gemini Aadhaar classification: '{raw}'")
+        # Enhance sharpness (2.0x) to sharpen text edges
+        img = ImageEnhance.Sharpness(img).enhance(2.0)
 
-            parts = raw.split("|", 1)
-            verdict = parts[0].strip().upper()
-            detail = parts[1].strip() if len(parts) > 1 else ""
-
-            if verdict == "VALID":
-                if detail and detail.upper() != "NONE":
-                    extracted_dob = _normalize_dob(detail)
-                print(f"✅ Aadhaar VALID | DOB: '{extracted_dob}'")
-                return True, "Aadhaar verified", extracted_dob
-            else:
-                print(f"❌ Aadhaar INVALID: {detail}")
-                return False, detail or "Not recognized as an Aadhaar card", ""
-
-        # ============================================================
-        # STRATEGY B: PAN CARD — OCR + strict regex
-        # (PAN numbers are always fully visible and unmasked)
-        # ============================================================
-        else:
-            pan_pattern = re.compile(r'^[A-Z]{5}[0-9]{4}[A-Z]$')
-
-            prompt = (
-                "You are performing OCR on this image to verify an Indian PAN Card.\n"
-                "The PAN number is ALWAYS 10 characters: 5 uppercase letters + 4 digits + 1 uppercase letter\n"
-                "Example valid PAN numbers: ABCDE1234F, OPVPK5956M, BXKPM3841G\n\n"
-                "Step 1: Find any 10-character string that matches the PAN format.\n"
-                "Step 2: Also try to find the Date of Birth if visible.\n\n"
-                "If the PAN number is found, respond in EXACTLY this format:\n"
-                "PAN:<10_char_number>|DOB:<DD/MM/YYYY_or_NONE>\n\n"
-                "If this is clearly NOT a PAN card OR no PAN number is visible, respond:\n"
-                "NOTFOUND\n\n"
-                "Examples of valid responses:\n"
-                "PAN:OPVPK5956M|DOB:08/08/2005\n"
-                "PAN:ABCDE1234F|DOB:NONE\n"
-                "NOTFOUND"
-            )
-
-            response = model.generate_content([image_part, prompt])
-            raw = response.text.strip() if response.text else "NOTFOUND"
-            print(f"Gemini PAN extraction: '{raw}'")
-
-            if "NOTFOUND" in raw.upper() or not raw.upper().startswith("PAN:"):
-                return False, "Not recognized as a PAN card. Ensure PAN number is clearly visible.", ""
-
-            # Parse: PAN:ABCDE1234F|DOB:01/01/1990
-            pan_section = raw.split("|")[0]  # "PAN:ABCDE1234F"
-            dob_section = raw.split("|")[1] if "|" in raw else ""
-
-            pan_number = pan_section.split(":", 1)[1].strip().upper().replace(" ", "")
-
-            if dob_section.upper().startswith("DOB:"):
-                dob_val = dob_section.split(":", 1)[1].strip()
-                if dob_val.upper() != "NONE":
-                    extracted_dob = _normalize_dob(dob_val)
-
-            print(f"Extracted PAN: '{pan_number}' | DOB: '{extracted_dob}'")
-
-            if pan_pattern.match(pan_number):
-                print(f"✅ PAN VALID: {pan_number}")
-                return True, pan_number, extracted_dob
-            else:
-                print(f"❌ PAN format invalid: '{pan_number}'")
-                return False, f"PAN number format invalid: '{pan_number}'. Expected format: ABCDE1234F", ""
+        # Convert back to bytes at high quality
+        buf = io.BytesIO()
+        img.save(buf, format='JPEG', quality=95)
+        processed_bytes = buf.getvalue()
+        print(f"  [Preprocess] Output size: {len(processed_bytes)//1024}KB")
+        return processed_bytes, img.size
 
     except Exception as e:
-        print(f"Document verification error: {e}")
-        return False, f"Verification error: {str(e)}", ""
-
+        print(f"  [Preprocess] Warning: {e} — using original image")
+        return image_bytes, (0, 0)
 
 
 # ==================================================
+# 🔍 STAGE 2+3+4 — OCR + AI VERIFICATION + FRAUD CHECK
+# ==================================================
+def verify_document_with_gemini(image_bytes, document_type, filename="document.jpg"):
+    """
+    5-Stage document verification pipeline:
+    Stage 1: Image Preprocessing (Pillow)
+    Stage 2: OCR Text Extraction (Gemini Vision)
+    Stage 3: AI / Regex Verification (pattern matching)
+    Stage 4: Fraud / Authenticity Check (second Gemini analysis)
+    Stage 5: Final Verification Result
+    Returns: (is_valid: bool, reason: str, extracted_dob: str)
+    """
+    print(f"\n{'='*50}")
+    print(f"🔎 Document Verification Pipeline: {document_type}")
+    print(f"{'='*50}")
+
+    if not GEMINI_API_KEY:
+        return False, "Gemini API key not configured", ""
+
+    # ── STAGE 1: IMAGE PREPROCESSING ──────────────────
+    print("[Stage 1] Image Preprocessing...")
+    processed_bytes, img_size = preprocess_document_image(image_bytes)
+    print(f"  Processed image dimensions: {img_size}")
+
+    # Encode for Gemini
+    ext = filename.lower().rsplit('.', 1)[-1] if '.' in filename else 'jpg'
+    mime_type = 'image/jpeg'  # Always JPEG after preprocessing
+    b64_image = base64.b64encode(processed_bytes).decode("utf-8")
+    image_part = {"inline_data": {"mime_type": mime_type, "data": b64_image}}
+
+    model = genai.GenerativeModel("gemini-1.5-flash")
+    extracted_text = ""
+    extracted_dob = ""
+
+    # ── STAGE 2: OCR TEXT EXTRACTION ──────────────────
+    print("[Stage 2] OCR Text Extraction via Gemini Vision...")
+    try:
+        ocr_prompt = (
+            "You are an OCR engine. Extract ALL visible text from this image exactly as it appears. "
+            "Include names, numbers, dates, labels, and any other text you can see. "
+            "Output ONLY the raw extracted text with no commentary."
+        )
+        ocr_response = model.generate_content([image_part, ocr_prompt])
+        extracted_text = ocr_response.text.strip() if ocr_response.text else ""
+        print(f"  Extracted text ({len(extracted_text)} chars): {extracted_text[:200]}...")
+    except Exception as e:
+        print(f"  [Stage 2] OCR Error: {e}")
+        extracted_text = ""
+
+    # ── STAGE 3: AI / REGEX VERIFICATION ──────────────
+    print("[Stage 3] AI + Regex Verification...")
+    is_valid_format = False
+    format_reason = ""
+
+    if "Aadhaar" in document_type:
+        # --- Aadhaar: Check extracted text for key markers ---
+        text_upper = extracted_text.upper()
+
+        # Regex: Find 12-digit Aadhaar number (including masked forms)
+        aadhaar_regex = re.compile(r'(\d{4}\s\d{4}\s\d{4}|\d{12}|[X]{4}\s[X]{4}\s\d{4}|[X0-9]{4}\s[X0-9]{4}\s[X0-9]{4})', re.IGNORECASE)
+        # Regex: Find date in various formats
+        dob_regex = re.compile(r'(\d{2}[/-]\d{2}[/-]\d{4}|\d{4}[/-]\d{2}[/-]\d{2})')
+
+        has_aadhaar_number = bool(aadhaar_regex.search(extracted_text))
+        has_dob = bool(dob_regex.search(extracted_text))
+        has_name = len(extracted_text) > 20  # Has some substantial text (name etc.)
+        has_uidai_marker = any(m in text_upper for m in ['AADHAAR', 'AADHAR', 'UIDAI', 'UNIQUE', '\u0906\u0927\u093e\u0930', 'GOVT OF INDIA', 'GOVERNMENT'])
+        has_gender = any(g in text_upper for g in ['MALE', 'FEMALE', '\u092a\u0941\u0930\u0941\u0937', '\u092e\u0939\u093f\u0932\u093e', 'M ', 'F '])
+        has_dob_label = any(d in text_upper for d in ['DOB', 'DATE OF BIRTH', '\u091c\u0928\u094d\u092e', 'D.O.B'])
+
+        score = sum([has_aadhaar_number*3, has_dob*1, has_name*1, has_uidai_marker*3, has_gender*1, has_dob_label*1])
+        print(f"  Aadhaar feature scores: number={has_aadhaar_number}, DOB={has_dob}, UIDAI={has_uidai_marker}, gender={has_gender}, score={score}/10")
+
+        # Extract DOB from text if found
+        dob_match = dob_regex.search(extracted_text)
+        if dob_match:
+            extracted_dob = _normalize_dob(dob_match.group())
+
+        # Valid if score >= 3 (at least some document-specific features found)
+        if score >= 3:
+            is_valid_format = True
+            format_reason = f"Aadhaar features detected (score {score}/10)"
+        else:
+            is_valid_format = False
+            format_reason = f"Insufficient Aadhaar features detected (score {score}/10). Ensure name, DOB, and Aadhaar number are visible."
+
+    else:
+        # --- PAN Card: Strict regex on PAN number ---
+        pan_regex = re.compile(r'[A-Z]{5}[0-9]{4}[A-Z]')
+        dob_regex = re.compile(r'(\d{2}[/-]\d{2}[/-]\d{4}|\d{4}[/-]\d{2}[/-]\d{2})')
+        text_upper = extracted_text.upper()
+
+        pan_match = pan_regex.search(text_upper)
+        has_income_tax = any(m in text_upper for m in ['INCOME TAX', 'PERMANENT ACCOUNT', 'GOVT OF INDIA', 'GOVERNMENT'])
+
+        dob_match = dob_regex.search(extracted_text)
+        if dob_match:
+            extracted_dob = _normalize_dob(dob_match.group())
+
+        if pan_match:
+            pan_number = pan_match.group()
+            is_valid_format = True
+            format_reason = f"Valid PAN number found: {pan_number}"
+            print(f"  PAN number found: {pan_number}")
+        else:
+            is_valid_format = False
+            format_reason = "No valid PAN number (format ABCDE1234F) found in document."
+            print(f"  No PAN number detected in OCR text")
+
+    print(f"  Stage 3 result: valid={is_valid_format} | {format_reason}")
+
+    # ── STAGE 4: FRAUD / AUTHENTICITY CHECK ───────────
+    print("[Stage 4] Fraud & Authenticity Check...")
+    fraud_verdict = True
+    fraud_reason = ""
+
+    try:
+        fraud_prompt = (
+            f"You are a document fraud detection AI. Examine this image of an Indian {document_type}.\n"
+            "Check for signs of fraud or tampering. Specifically look for:\n"
+            "1. Is this a photo of a genuine physical card (acceptable) or a screenshot of a phone screen showing a PDF/image (suspicious)?\n"
+            "2. Are there obvious copy-paste artifacts, font mismatches, or digital editing signs?\n"
+            "3. Is the document clearly readable or suspiciously blurred to hide text?\n"
+            "4. Does it look like a printout of a computer-generated fake?\n\n"
+            "NOTE: A photo taken of a physical card, including slight glare/angle/background is AUTHENTIC.\n"
+            "A digital scan or photocopy is also AUTHENTIC.\n\n"
+            "Respond in EXACTLY this format:\n"
+            "AUTHENTIC|<one_line_reason>\n"
+            "or\n"
+            "SUSPICIOUS|<one_line_reason>"
+        )
+        fraud_response = model.generate_content([image_part, fraud_prompt])
+        fraud_raw = fraud_response.text.strip() if fraud_response.text else "AUTHENTIC|Unable to check"
+        print(f"  Fraud check response: '{fraud_raw}'")
+
+        fraud_parts = fraud_raw.split("|", 1)
+        if fraud_parts[0].strip().upper() == "SUSPICIOUS":
+            fraud_verdict = False
+            fraud_reason = fraud_parts[1].strip() if len(fraud_parts) > 1 else "Document appears suspicious"
+        else:
+            fraud_verdict = True
+            fraud_reason = fraud_parts[1].strip() if len(fraud_parts) > 1 else "Document appears authentic"
+    except Exception as e:
+        print(f"  [Stage 4] Fraud check error: {e} — skipping")
+        fraud_verdict = True  # Don't penalise on error
+        fraud_reason = "Authenticity check skipped"
+
+    print(f"  Stage 4 result: authentic={fraud_verdict} | {fraud_reason}")
+
+    # ── STAGE 5: FINAL VERIFICATION RESULT ────────────
+    print("[Stage 5] Computing Final Result...")
+    if is_valid_format and fraud_verdict:
+        final_result = True
+        final_reason = format_reason
+        print(f"✅ VERIFIED: {document_type} | {final_reason}")
+    elif not fraud_verdict:
+        final_result = False
+        final_reason = f"⚠️ Fraud/authenticity check failed: {fraud_reason}"
+        print(f"❌ FRAUD DETECTED: {final_reason}")
+    else:
+        final_result = False
+        final_reason = format_reason
+        print(f"❌ FORMAT INVALID: {final_reason}")
+
+    print(f"{'='*50}\n")
+    return final_result, final_reason, extracted_dob
+
+
+# ==================================================
+
 # 👤 SAVE / UPDATE USER PROFILE
 # ==================================================
 @app.route('/save_profile', methods=['POST'])
