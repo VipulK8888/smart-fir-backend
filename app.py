@@ -595,17 +595,16 @@ def _normalize_dob(dob_str):
 
 def verify_document_with_gemini(image_bytes, document_type, filename="document.jpg"):
     """
-    Real image processing based document verification.
-    Uses Gemini Vision to extract the document's unique ID number AND Date of Birth,
-    then validates the ID against strict Indian government regex format patterns.
-    Returns: (is_valid: bool, extracted_id_or_error: str, extracted_dob: str)
+    Two-strategy document verification:
+    - Aadhaar: Holistic visual classification by Gemini (robust for masked numbers)
+    - PAN: OCR extraction + strict regex (PAN number is always fully visible)
+    Returns: (is_valid: bool, reason: str, extracted_dob: str)
     """
     try:
         if not GEMINI_API_KEY:
             return False, "Gemini API key not configured", ""
 
         import base64
-        # Detect correct MIME type from actual file extension
         ext = filename.lower().rsplit('.', 1)[-1] if '.' in filename else 'jpg'
         mime_map = {
             'jpg': 'image/jpeg', 'jpeg': 'image/jpeg', 'png': 'image/png',
@@ -622,69 +621,107 @@ def verify_document_with_gemini(image_bytes, document_type, filename="document.j
             }
         }
 
-        # ---- Build document-specific extraction prompts ----
+        extracted_dob = ""
+
+        # ============================================================
+        # STRATEGY A: AADHAAR — Holistic visual classification
+        # (Aadhaar numbers are often masked; rely on ALL visible features)
+        # ============================================================
         if "Aadhaar" in document_type:
             prompt = (
-                "You are performing OCR on this image to verify an Indian Aadhaar Card. "
-                "Your PRIMARY task is to find the 12-digit Aadhaar number. "
-                "It may appear as: 'XXXX XXXX XXXX', '############', or partially masked like 'XXXX XXXX 1234'. "
-                "If you find the 12-digit Aadhaar number, respond with: AADHAAR:<12_digits_no_spaces> "
-                "Additionally, if you can ALSO see the Date of Birth in the image, append it: AADHAAR:<number>|DOB:<DD/MM/YYYY> "
-                "If the Aadhaar number is NOT visible OR this is clearly NOT an Aadhaar card, respond ONLY with: NOTFOUND"
+                "You are a document verification AI. Examine this image carefully.\n"
+                "Determine if this is an Indian Aadhaar Card issued by UIDAI.\n\n"
+                "Look for ANY of these features:\n"
+                "- Person's name in English or Hindi\n"
+                "- Date of Birth (DOB or जन्म तिथि)\n"
+                "- Gender (Male/Female/पुरुष/महिला)\n"
+                "- A 12-digit number (may be fully or partially masked as XXXX XXXX XXXX)\n"
+                "- QR code\n"
+                "- Text: 'Aadhaar', 'आधार', 'UIDAI', or 'Government of India'\n"
+                "- Blue/orange coloured Aadhaar logo\n\n"
+                "IMPORTANT: Even if only the photo+name+DOB side is shown (number on the other side), "
+                "it IS still a valid Aadhaar card if name, DOB, and gender are visible.\n\n"
+                "Respond in EXACTLY this format:\n"
+                "VALID|<extracted_dob_if_visible_else_NONE>\n"
+                "or\n"
+                "INVALID|<brief_reason>\n\n"
+                "Examples:\n"
+                "VALID|08/08/2005\n"
+                "VALID|NONE\n"
+                "INVALID|This appears to be a driving license, not Aadhaar"
             )
-            valid_pattern = re.compile(r'^[2-9]\d{11}$')  # Aadhaar: starts with 2-9, 12 digits
+
+            response = model.generate_content([image_part, prompt])
+            raw = response.text.strip() if response.text else "INVALID|No response"
+            print(f"Gemini Aadhaar classification: '{raw}'")
+
+            parts = raw.split("|", 1)
+            verdict = parts[0].strip().upper()
+            detail = parts[1].strip() if len(parts) > 1 else ""
+
+            if verdict == "VALID":
+                if detail and detail.upper() != "NONE":
+                    extracted_dob = _normalize_dob(detail)
+                print(f"✅ Aadhaar VALID | DOB: '{extracted_dob}'")
+                return True, "Aadhaar verified", extracted_dob
+            else:
+                print(f"❌ Aadhaar INVALID: {detail}")
+                return False, detail or "Not recognized as an Aadhaar card", ""
+
+        # ============================================================
+        # STRATEGY B: PAN CARD — OCR + strict regex
+        # (PAN numbers are always fully visible and unmasked)
+        # ============================================================
         else:
-            # PAN Card
+            pan_pattern = re.compile(r'^[A-Z]{5}[0-9]{4}[A-Z]$')
+
             prompt = (
-                "You are performing OCR on this image to verify an Indian PAN Card. "
-                "Your PRIMARY task is to find the PAN number, which is always exactly 10 characters: "
-                "5 uppercase letters, then 4 digits, then 1 uppercase letter (e.g., ABCDE1234F, OPVPK5956M). "
-                "If you find the PAN number, respond with: PAN:<10_char_pan_number> "
-                "Additionally, if you can ALSO see the Date of Birth in the image, append it: PAN:<number>|DOB:<DD/MM/YYYY> "
-                "If the PAN number is NOT visible OR this is clearly NOT a PAN card, respond ONLY with: NOTFOUND"
+                "You are performing OCR on this image to verify an Indian PAN Card.\n"
+                "The PAN number is ALWAYS 10 characters: 5 uppercase letters + 4 digits + 1 uppercase letter\n"
+                "Example valid PAN numbers: ABCDE1234F, OPVPK5956M, BXKPM3841G\n\n"
+                "Step 1: Find any 10-character string that matches the PAN format.\n"
+                "Step 2: Also try to find the Date of Birth if visible.\n\n"
+                "If the PAN number is found, respond in EXACTLY this format:\n"
+                "PAN:<10_char_number>|DOB:<DD/MM/YYYY_or_NONE>\n\n"
+                "If this is clearly NOT a PAN card OR no PAN number is visible, respond:\n"
+                "NOTFOUND\n\n"
+                "Examples of valid responses:\n"
+                "PAN:OPVPK5956M|DOB:08/08/2005\n"
+                "PAN:ABCDE1234F|DOB:NONE\n"
+                "NOTFOUND"
             )
-            valid_pattern = re.compile(r'^[A-Z]{5}[0-9]{4}[A-Z]$')  # Strict 10-char PAN format
 
+            response = model.generate_content([image_part, prompt])
+            raw = response.text.strip() if response.text else "NOTFOUND"
+            print(f"Gemini PAN extraction: '{raw}'")
 
-        response = model.generate_content([image_part, prompt])
-        raw = response.text.strip() if response.text else "NOTFOUND"
-        print(f"Gemini {document_type} raw extraction: '{raw}'")
+            if "NOTFOUND" in raw.upper() or not raw.upper().startswith("PAN:"):
+                return False, "Not recognized as a PAN card. Ensure PAN number is clearly visible.", ""
 
-        if raw == "NOTFOUND" or "NOTFOUND" in raw.upper():
-            return False, "Document not recognized. Please upload a clear photo of your actual document.", ""
+            # Parse: PAN:ABCDE1234F|DOB:01/01/1990
+            pan_section = raw.split("|")[0]  # "PAN:ABCDE1234F"
+            dob_section = raw.split("|")[1] if "|" in raw else ""
 
-        # ---- Parse ID and DOB from response ----
-        extracted_id = ""
-        extracted_dob = ""
-        parts = raw.split("|")
-        id_part = parts[0] if parts else raw
-        dob_part = parts[1] if len(parts) > 1 else ""
+            pan_number = pan_section.split(":", 1)[1].strip().upper().replace(" ", "")
 
-        if id_part.upper().startswith("AADHAAR:"):
-            extracted_id = id_part.split(":", 1)[1].strip().replace(" ", "").replace("-", "")
-        elif id_part.upper().startswith("PAN:"):
-            extracted_id = id_part.split(":", 1)[1].strip().replace(" ", "").upper()
-        else:
-            # Fallback: search for patterns directly in the full raw text
-            nums = re.findall(r'\d+', raw)
-            extracted_id = ''.join(nums) if "Aadhaar" in document_type else raw.strip().upper()
+            if dob_section.upper().startswith("DOB:"):
+                dob_val = dob_section.split(":", 1)[1].strip()
+                if dob_val.upper() != "NONE":
+                    extracted_dob = _normalize_dob(dob_val)
 
-        if dob_part.upper().startswith("DOB:"):
-            extracted_dob = _normalize_dob(dob_part.split(":", 1)[1].strip())
+            print(f"Extracted PAN: '{pan_number}' | DOB: '{extracted_dob}'")
 
-        print(f"Extracted {document_type} ID: '{extracted_id}' | DOB: '{extracted_dob}'")
-
-        # ---- Strict regex format validation on the ID ----
-        if valid_pattern.match(extracted_id):
-            print(f"✅ {document_type} VALID: {extracted_id}")
-            return True, extracted_id, extracted_dob
-        else:
-            print(f"❌ {document_type} INVALID format: '{extracted_id}' does not match pattern")
-            return False, f"ID number format invalid: '{extracted_id}'", ""
+            if pan_pattern.match(pan_number):
+                print(f"✅ PAN VALID: {pan_number}")
+                return True, pan_number, extracted_dob
+            else:
+                print(f"❌ PAN format invalid: '{pan_number}'")
+                return False, f"PAN number format invalid: '{pan_number}'. Expected format: ABCDE1234F", ""
 
     except Exception as e:
         print(f"Document verification error: {e}")
-        return False, f"Verification failed: {str(e)}", ""
+        return False, f"Verification error: {str(e)}", ""
+
 
 
 # ==================================================
