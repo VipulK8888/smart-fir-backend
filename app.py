@@ -574,49 +574,119 @@ def get_fir(fir_id):
         return jsonify({"status": "error", "message": str(e)}), 500
 
 # ==================================================
-# 🧠 GEMINI DOCUMENT VERIFICATION HELPER
+# 🧠 REAL DOCUMENT VERIFICATION (OCR + Regex + Gemini Vision)
 # ==================================================
+def _normalize_dob(dob_str):
+    """Normalizes any date string to DD/MM/YYYY for consistent comparison."""
+    if not dob_str:
+        return ""
+    dob_str = dob_str.strip().replace("-", "/").replace(".", "/")
+    # Try various formats and normalize
+    import re as _re
+    # Handles YYYY/MM/DD → DD/MM/YYYY
+    match = _re.match(r'(\d{4})/(\d{2})/(\d{2})', dob_str)
+    if match:
+        return f"{match.group(3)}/{match.group(2)}/{match.group(1)}"
+    # Already DD/MM/YYYY
+    match = _re.match(r'(\d{2})/(\d{2})/(\d{4})', dob_str)
+    if match:
+        return dob_str
+    return dob_str
+
 def verify_document_with_gemini(image_bytes, document_type, filename="document.jpg"):
-    """Sends image bytes to Gemini and asks if it's a valid Indian document."""
+    """
+    Real image processing based document verification.
+    Uses Gemini Vision to extract the document's unique ID number AND Date of Birth,
+    then validates the ID against strict Indian government regex format patterns.
+    Returns: (is_valid: bool, extracted_id_or_error: str, extracted_dob: str)
+    """
     try:
         if not GEMINI_API_KEY:
-            # If Gemini is not configured, default to verified to not block users
-            return True, "Gemini API not configured - auto-approved"
-        
+            return False, "Gemini API key not configured", ""
+
         import base64
-        # Detect MIME from filename extension
+        # Detect correct MIME type from actual file extension
         ext = filename.lower().rsplit('.', 1)[-1] if '.' in filename else 'jpg'
-        mime_map = {'jpg': 'image/jpeg', 'jpeg': 'image/jpeg', 'png': 'image/png', 
-                    'webp': 'image/webp', 'gif': 'image/gif', 'heic': 'image/heic'}
+        mime_map = {
+            'jpg': 'image/jpeg', 'jpeg': 'image/jpeg', 'png': 'image/png',
+            'webp': 'image/webp', 'heic': 'image/heic', 'heif': 'image/heic'
+        }
         mime_type = mime_map.get(ext, 'image/jpeg')
-        
+
         model = genai.GenerativeModel("gemini-1.5-flash")
         b64_image = base64.b64encode(image_bytes).decode("utf-8")
-        
-        # Use inline_data Part format which is the correct genai SDK approach
         image_part = {
             "inline_data": {
                 "mime_type": mime_type,
                 "data": b64_image
             }
         }
-        
-        prompt = (
-            f"Look at this image carefully. It may be a photo taken of a physical {document_type} card, "
-            f"a scan, or a screenshot. A valid Indian {document_type} might show: name, date of birth, "
-            f"ID number, government logo, or other standard fields — even if the image is at an angle "
-            f"or partially visible. Does this image appear to contain an Indian {document_type}? "
-            f"Reply ONLY with YES or NO."
-        )
-        
+
+        # ---- Build document-specific extraction prompts ----
+        if "Aadhaar" in document_type:
+            prompt = (
+                "You are performing OCR on this image to verify an Indian Aadhaar Card. "
+                "Extract TWO pieces of information: "
+                "1) The 12-digit Aadhaar number (format: XXXX XXXX XXXX or ############, may be partially masked). "
+                "2) The Date of Birth (in DD/MM/YYYY format). "
+                "If both are found, respond ONLY in this exact format: "
+                "AADHAAR:<12_digits_no_spaces>|DOB:<DD/MM/YYYY>. "
+                "If this does NOT look like an Aadhaar card or numbers cannot be found, respond ONLY with: NOTFOUND"
+            )
+            valid_pattern = re.compile(r'^[2-9]\d{11}$')  # Aadhaar: starts with 2-9, 12 digits
+        else:
+            # PAN Card
+            prompt = (
+                "You are performing OCR on this image to verify an Indian PAN Card. "
+                "Extract TWO pieces of information: "
+                "1) The PAN number (format: 5 uppercase letters + 4 digits + 1 uppercase letter, e.g. ABCDE1234F). "
+                "2) The Date of Birth (in DD/MM/YYYY format). "
+                "If both are found, respond ONLY in this exact format: "
+                "PAN:<10_char_pan_number>|DOB:<DD/MM/YYYY>. "
+                "If this does NOT look like a PAN card or numbers cannot be found, respond ONLY with: NOTFOUND"
+            )
+            valid_pattern = re.compile(r'^[A-Z]{5}[0-9]{4}[A-Z]$')  # Strict 10-char PAN format
+
         response = model.generate_content([image_part, prompt])
-        answer = response.text.strip().upper() if response.text else "NO"
-        print(f"Gemini {document_type} verification: '{response.text.strip()}' -> {answer.startswith('YES')}")
-        return answer.startswith("YES"), None
+        raw = response.text.strip() if response.text else "NOTFOUND"
+        print(f"Gemini {document_type} raw extraction: '{raw}'")
+
+        if raw == "NOTFOUND" or "NOTFOUND" in raw.upper():
+            return False, "Document not recognized. Please upload a clear photo of your actual document.", ""
+
+        # ---- Parse ID and DOB from response ----
+        extracted_id = ""
+        extracted_dob = ""
+        parts = raw.split("|")
+        id_part = parts[0] if parts else raw
+        dob_part = parts[1] if len(parts) > 1 else ""
+
+        if id_part.upper().startswith("AADHAAR:"):
+            extracted_id = id_part.split(":", 1)[1].strip().replace(" ", "").replace("-", "")
+        elif id_part.upper().startswith("PAN:"):
+            extracted_id = id_part.split(":", 1)[1].strip().replace(" ", "").upper()
+        else:
+            # Fallback: search for patterns directly in the full raw text
+            nums = re.findall(r'\d+', raw)
+            extracted_id = ''.join(nums) if "Aadhaar" in document_type else raw.strip().upper()
+
+        if dob_part.upper().startswith("DOB:"):
+            extracted_dob = _normalize_dob(dob_part.split(":", 1)[1].strip())
+
+        print(f"Extracted {document_type} ID: '{extracted_id}' | DOB: '{extracted_dob}'")
+
+        # ---- Strict regex format validation on the ID ----
+        if valid_pattern.match(extracted_id):
+            print(f"✅ {document_type} VALID: {extracted_id}")
+            return True, extracted_id, extracted_dob
+        else:
+            print(f"❌ {document_type} INVALID format: '{extracted_id}' does not match pattern")
+            return False, f"ID number format invalid: '{extracted_id}'", ""
+
     except Exception as e:
-        print(f"Gemini doc verification error: {e}")
-        # On API error, default to verified to not block legitimate users
-        return True, f"Verification skipped: {str(e)}"
+        print(f"Document verification error: {e}")
+        return False, f"Verification failed: {str(e)}", ""
+
 
 # ==================================================
 # 👤 SAVE / UPDATE USER PROFILE
@@ -640,6 +710,7 @@ def save_profile():
         }
 
         # --- Process Aadhaar Image ---
+        aadhaar_dob = ""
         if "aadhaar_image" in request.files:
             aadhaar_file = request.files["aadhaar_image"]
             aadhaar_bytes = aadhaar_file.read()
@@ -651,11 +722,14 @@ def save_profile():
                 except Exception:
                     pass
             aadhaar_id = fs.put(aadhaar_bytes, filename=aadhaar_file.filename, content_type=aadhaar_file.content_type or "image/jpeg")
-            verified, _ = verify_document_with_gemini(aadhaar_bytes, "Aadhaar Card", filename=aadhaar_file.filename or "aadhaar.jpg")
+            aadhaar_verified, _, aadhaar_dob = verify_document_with_gemini(aadhaar_bytes, "Aadhaar Card", filename=aadhaar_file.filename or "aadhaar.jpg")
             update_doc["aadhaar_id"] = str(aadhaar_id)
-            update_doc["aadhaar_verified"] = verified
+            update_doc["aadhaar_verified"] = aadhaar_verified
+            if aadhaar_dob:
+                update_doc["aadhaar_dob"] = aadhaar_dob
 
         # --- Process PAN Image ---
+        pan_dob = ""
         if "pan_image" in request.files:
             pan_file = request.files["pan_image"]
             pan_bytes = pan_file.read()
@@ -667,9 +741,27 @@ def save_profile():
                 except Exception:
                     pass
             pan_id = fs.put(pan_bytes, filename=pan_file.filename, content_type=pan_file.content_type or "image/jpeg")
-            verified, _ = verify_document_with_gemini(pan_bytes, "PAN Card", filename=pan_file.filename or "pan.jpg")
+            pan_verified, _, pan_dob = verify_document_with_gemini(pan_bytes, "PAN Card", filename=pan_file.filename or "pan.jpg")
             update_doc["pan_id"] = str(pan_id)
-            update_doc["pan_verified"] = verified
+            update_doc["pan_verified"] = pan_verified
+            if pan_dob:
+                update_doc["pan_dob"] = pan_dob
+
+        # ---- Cross-Document DOB Matching ----
+        # Only compare when BOTH documents were uploaded in this request
+        if aadhaar_dob and pan_dob:
+            if aadhaar_dob != pan_dob:
+                print(f"❌ DOB Mismatch! Aadhaar DOB: '{aadhaar_dob}' vs PAN DOB: '{pan_dob}'")
+                # Both documents fail — they belong to different people
+                update_doc["aadhaar_verified"] = False
+                update_doc["pan_verified"] = False
+                update_doc["verification_failure_reason"] = (
+                    f"DOB mismatch detected: Aadhaar shows '{aadhaar_dob}' but PAN shows '{pan_dob}'. "
+                    "Both documents must belong to the same person."
+                )
+            else:
+                print(f"✅ DOB Match confirmed: {aadhaar_dob}")
+                update_doc["verification_failure_reason"] = None
 
         users_col.update_one({"email": email}, {"$set": update_doc}, upsert=True)
 
