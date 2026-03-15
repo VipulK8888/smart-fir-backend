@@ -735,13 +735,13 @@ def verify_document_with_gemini(image_bytes, document_type, filename="document.j
         if dob_match:
             extracted_dob = _normalize_dob(dob_match.group())
 
-        # Valid if score >= 3 (at least some document-specific features found)
-        if score >= 3:
+        # Valid if score >= 2 (name + any one Aadhaar feature = sufficient)
+        if score >= 2:
             is_valid_format = True
-            format_reason = f"Aadhaar features detected (score {score}/10)"
+            format_reason = f"Aadhaar verified (feature score {score}/10)"
         else:
             is_valid_format = False
-            format_reason = f"Insufficient Aadhaar features detected (score {score}/10). Ensure name, DOB, and Aadhaar number are visible."
+            format_reason = f"Cannot confirm this is an Aadhaar card (score {score}/10). Please upload a clear photo showing name, DOB, and Aadhaar number."
 
     else:
         # --- PAN Card: Strict regex on PAN number ---
@@ -768,58 +768,38 @@ def verify_document_with_gemini(image_bytes, document_type, filename="document.j
 
     print(f"  Stage 3 result: valid={is_valid_format} | {format_reason}")
 
-    # ── STAGE 4: FRAUD / AUTHENTICITY CHECK ───────────
-    print("[Stage 4] Fraud & Authenticity Check...")
-    fraud_verdict = True
-    fraud_reason = ""
-
+    # ── STAGE 4: FRAUD / AUTHENTICITY CHECK (WARNING ONLY) ───
+    print("[Stage 4] Fraud & Authenticity Check (advisory only)...")
+    fraud_warning = ""
     try:
         fraud_prompt = (
             f"You are a document fraud detection AI. Examine this image of an Indian {document_type}.\n"
-            "Check for signs of fraud or tampering. Specifically look for:\n"
-            "1. Is this a photo of a genuine physical card (acceptable) or a screenshot of a phone screen showing a PDF/image (suspicious)?\n"
-            "2. Are there obvious copy-paste artifacts, font mismatches, or digital editing signs?\n"
-            "3. Is the document clearly readable or suspiciously blurred to hide text?\n"
-            "4. Does it look like a printout of a computer-generated fake?\n\n"
-            "NOTE: A photo taken of a physical card, including slight glare/angle/background is AUTHENTIC.\n"
-            "A digital scan or photocopy is also AUTHENTIC.\n\n"
-            "Respond in EXACTLY this format:\n"
-            "AUTHENTIC|<one_line_reason>\n"
-            "or\n"
-            "SUSPICIOUS|<one_line_reason>"
+            "Very briefly assess: does this look like a GENUINE document or an OBVIOUS digital fake?\n"
+            "NOTE: Photos of physical cards (even with glare, shadows, or tilted) are GENUINE.\n"
+            "Scans, photocopies, and digital images from DigiLocker are ALSO genuine.\n"
+            "Only flag as SUSPICIOUS if you see clear signs of digital editing or computer-generated text.\n"
+            "Respond: GENUINE or SUSPICIOUS"
         )
         fraud_response = model.generate_content([image_part, fraud_prompt])
-        fraud_raw = fraud_response.text.strip() if fraud_response.text else "AUTHENTIC|Unable to check"
-        print(f"  Fraud check response: '{fraud_raw}'")
-
-        fraud_parts = fraud_raw.split("|", 1)
-        if fraud_parts[0].strip().upper() == "SUSPICIOUS":
-            fraud_verdict = False
-            fraud_reason = fraud_parts[1].strip() if len(fraud_parts) > 1 else "Document appears suspicious"
-        else:
-            fraud_verdict = True
-            fraud_reason = fraud_parts[1].strip() if len(fraud_parts) > 1 else "Document appears authentic"
+        fraud_raw = fraud_response.text.strip() if fraud_response.text else "GENUINE"
+        print(f"  Fraud advisory: '{fraud_raw}'")
+        if "SUSPICIOUS" in fraud_raw.upper():
+            fraud_warning = "Advisory: document may need manual review"
     except Exception as e:
-        print(f"  [Stage 4] Fraud check error: {e} — skipping")
-        fraud_verdict = True  # Don't penalise on error
-        fraud_reason = "Authenticity check skipped"
+        print(f"  [Stage 4] Skipped: {e}")
 
-    print(f"  Stage 4 result: authentic={fraud_verdict} | {fraud_reason}")
-
-    # ── STAGE 5: FINAL VERIFICATION RESULT ────────────
+    # ── STAGE 5: FINAL RESULT (based only on Stage 3) ─────────
     print("[Stage 5] Computing Final Result...")
-    if is_valid_format and fraud_verdict:
+    if is_valid_format:
         final_result = True
         final_reason = format_reason
+        if fraud_warning:
+            final_reason += f" | {fraud_warning}"
         print(f"✅ VERIFIED: {document_type} | {final_reason}")
-    elif not fraud_verdict:
-        final_result = False
-        final_reason = f"⚠️ Fraud/authenticity check failed: {fraud_reason}"
-        print(f"❌ FRAUD DETECTED: {final_reason}")
     else:
         final_result = False
         final_reason = format_reason
-        print(f"❌ FORMAT INVALID: {final_reason}")
+        print(f"❌ NOT VERIFIED: {document_type} | {final_reason}")
 
     print(f"{'='*50}\n")
     return final_result, final_reason, extracted_dob
@@ -1051,4 +1031,3 @@ if __name__ == '__main__':
     # Cloud providers like Render supply a PORT env variable
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
-
