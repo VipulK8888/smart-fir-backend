@@ -578,12 +578,131 @@ def get_fir(fir_id):
         return jsonify({"status": "error", "message": str(e)}), 500
 
 # ==================================================
-# 🛠️ DOCUMENT VERIFICATION — OpenCV + Tesseract + Regex
+# 🛠️ DOCUMENT VERIFICATION — OpenCV + Gemini OCR + Regex
 # ==================================================
 import cv2
 import numpy as np
-import pytesseract
 from PIL import Image, ImageEnhance
+
+def _normalize_dob(dob_str):
+    """Normalizes any date string to DD/MM/YYYY for consistent comparison."""
+    if not dob_str:
+        return ""
+    dob_str = dob_str.strip().replace("-", "/").replace(".", "/")
+    match = re.match(r'(\d{4})/(\d{2})/(\d{2})', dob_str)
+    if match:
+        return f"{match.group(3)}/{match.group(2)}/{match.group(1)}"
+    return dob_str
+
+
+# ── STAGE 1: IMAGE PREPROCESSING (OpenCV) ─────────────────────
+def preprocess_document_image(image_bytes):
+    """
+    OpenCV preprocessing pipeline:
+    • Decodes image bytes to numpy array
+    • Auto-rotates via EXIF data
+    • Upscales to min 1400px for clear OCR
+    • Converts to grayscale
+    • Bilateral filter (noise removal, keeps edges)
+    • Adaptive threshold (binarizes text)
+    Returns: (thresh_array, original_color_array, (w,h))
+    """
+    try:
+        np_arr = np.frombuffer(image_bytes, np.uint8)
+        img_cv = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+        if img_cv is None:
+            raise ValueError("Could not decode image")
+
+        # Auto-rotate from EXIF using Pillow
+        try:
+            pil_img = Image.open(io.BytesIO(image_bytes))
+            from PIL import ExifTags
+            for k in ExifTags.TAGS.keys():
+                if ExifTags.TAGS[k] == 'Orientation':
+                    break
+            exif = pil_img._getexif()
+            if exif and k in exif:
+                rot_map = {3: cv2.ROTATE_180, 6: cv2.ROTATE_90_CLOCKWISE, 8: cv2.ROTATE_90_COUNTERCLOCKWISE}
+                if exif[k] in rot_map:
+                    img_cv = cv2.rotate(img_cv, rot_map[exif[k]])
+        except Exception:
+            pass
+
+        # Upscale if too small
+        h, w = img_cv.shape[:2]
+        if max(h, w) < 1400:
+            scale = 1400 / max(h, w)
+            img_cv = cv2.resize(img_cv, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_CUBIC)
+            print(f"  [Preprocess] Upscaled to {img_cv.shape[1]}x{img_cv.shape[0]}")
+
+        original_cv = img_cv.copy()
+        gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
+        denoised = cv2.bilateralFilter(gray, 9, 75, 75)
+        thresh = cv2.adaptiveThreshold(denoised, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
+        print(f"  [Preprocess] Output: {thresh.shape[1]}x{thresh.shape[0]}")
+        return thresh, original_cv, (thresh.shape[1], thresh.shape[0])
+
+    except Exception as e:
+        print(f"  [Preprocess] Error: {e}")
+        return None, None, (0, 0)
+
+
+# ── STAGE 2: OCR TEXT EXTRACTION (Gemini Vision) ──────────────
+def extract_text_with_gemini(image_bytes, preprocessed_arr):
+    """
+    Uses Gemini Vision as the OCR engine.
+    Runs OCR on both the preprocessed (thresholded) image AND the
+    original image bytes for maximum text coverage.
+    Returns combined raw text string.
+    """
+    if not GEMINI_API_KEY:
+        return ""
+    try:
+        model = genai.GenerativeModel("gemini-1.5-flash")
+        ocr_prompt = (
+            "You are an OCR engine. Extract ALL visible text from this document image EXACTLY as it appears. "
+            "Include: names, ID numbers, dates, labels, addresses, Hindi/English text, everything. "
+            "Do NOT interpret or summarize. Output RAW TEXT ONLY."
+        )
+        # Send original image bytes for best quality
+        b64 = base64.b64encode(image_bytes).decode("utf-8")
+        ext = 'image/jpeg'
+        image_part = {"inline_data": {"mime_type": ext, "data": b64}}
+        response = model.generate_content([image_part, ocr_prompt])
+        text = response.text.strip() if response.text else ""
+        print(f"  [OCR] Gemini extracted {len(text)} chars")
+        print(f"  [OCR] Preview: {text[:250]}")
+        return text
+    except Exception as e:
+        print(f"  [OCR] Gemini OCR error: {e}")
+        return ""
+
+
+# ── STAGE 4: FRAUD / QUALITY CHECKS (OpenCV) ──────────────────
+def run_fraud_checks(original_img, image_bytes):
+    """
+    Checks image quality using OpenCV:
+    1. Resolution: minimum 300x200px
+    2. Blur: Laplacian variance < 60 = too blurry
+    Returns: (is_ok: bool, message: str)
+    """
+    if original_img is None:
+        return True, "Quality check skipped"
+
+    h, w = original_img.shape[:2]
+    if w < 300 or h < 200:
+        return False, f"Image too small ({w}x{h}px). Please upload a larger photo."
+
+    gray = cv2.cvtColor(original_img, cv2.COLOR_BGR2GRAY)
+    laplacian_var = cv2.Laplacian(gray, cv2.CV_64F).var()
+    print(f"  [Fraud] Blur score: {laplacian_var:.1f} (threshold: 60)")
+
+    if laplacian_var < 60:
+        return False, f"Image too blurry (score {laplacian_var:.0f}). Please take a clearer photo."
+
+    return True, f"Quality OK (blur score: {laplacian_var:.0f})"
+
+
 
 def _normalize_dob(dob_str):
     """Normalizes any date string to DD/MM/YYYY for consistent comparison."""
