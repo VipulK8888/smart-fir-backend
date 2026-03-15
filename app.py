@@ -626,26 +626,25 @@ def verify_document_with_gemini(image_bytes, document_type, filename="document.j
         if "Aadhaar" in document_type:
             prompt = (
                 "You are performing OCR on this image to verify an Indian Aadhaar Card. "
-                "Extract TWO pieces of information: "
-                "1) The 12-digit Aadhaar number (format: XXXX XXXX XXXX or ############, may be partially masked). "
-                "2) The Date of Birth (in DD/MM/YYYY format). "
-                "If both are found, respond ONLY in this exact format: "
-                "AADHAAR:<12_digits_no_spaces>|DOB:<DD/MM/YYYY>. "
-                "If this does NOT look like an Aadhaar card or numbers cannot be found, respond ONLY with: NOTFOUND"
+                "Your PRIMARY task is to find the 12-digit Aadhaar number. "
+                "It may appear as: 'XXXX XXXX XXXX', '############', or partially masked like 'XXXX XXXX 1234'. "
+                "If you find the 12-digit Aadhaar number, respond with: AADHAAR:<12_digits_no_spaces> "
+                "Additionally, if you can ALSO see the Date of Birth in the image, append it: AADHAAR:<number>|DOB:<DD/MM/YYYY> "
+                "If the Aadhaar number is NOT visible OR this is clearly NOT an Aadhaar card, respond ONLY with: NOTFOUND"
             )
             valid_pattern = re.compile(r'^[2-9]\d{11}$')  # Aadhaar: starts with 2-9, 12 digits
         else:
             # PAN Card
             prompt = (
                 "You are performing OCR on this image to verify an Indian PAN Card. "
-                "Extract TWO pieces of information: "
-                "1) The PAN number (format: 5 uppercase letters + 4 digits + 1 uppercase letter, e.g. ABCDE1234F). "
-                "2) The Date of Birth (in DD/MM/YYYY format). "
-                "If both are found, respond ONLY in this exact format: "
-                "PAN:<10_char_pan_number>|DOB:<DD/MM/YYYY>. "
-                "If this does NOT look like a PAN card or numbers cannot be found, respond ONLY with: NOTFOUND"
+                "Your PRIMARY task is to find the PAN number, which is always exactly 10 characters: "
+                "5 uppercase letters, then 4 digits, then 1 uppercase letter (e.g., ABCDE1234F, OPVPK5956M). "
+                "If you find the PAN number, respond with: PAN:<10_char_pan_number> "
+                "Additionally, if you can ALSO see the Date of Birth in the image, append it: PAN:<number>|DOB:<DD/MM/YYYY> "
+                "If the PAN number is NOT visible OR this is clearly NOT a PAN card, respond ONLY with: NOTFOUND"
             )
             valid_pattern = re.compile(r'^[A-Z]{5}[0-9]{4}[A-Z]$')  # Strict 10-char PAN format
+
 
         response = model.generate_content([image_part, prompt])
         raw = response.text.strip() if response.text else "NOTFOUND"
