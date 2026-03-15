@@ -588,30 +588,30 @@ def _normalize_dob(dob_str):
     """Normalizes any date string to DD/MM/YYYY for consistent comparison."""
     if not dob_str:
         return ""
+    # Clean string
     dob_str = dob_str.strip().replace("-", "/").replace(".", "/")
+    
+    # Try YYYY/MM/DD -> DD/MM/YYYY
     match = re.match(r'(\d{4})/(\d{2})/(\d{2})', dob_str)
     if match:
         return f"{match.group(3)}/{match.group(2)}/{match.group(1)}"
+    
+    # Already DD/MM/YYYY
+    match = re.match(r'(\d{2})/(\d{2})/(\d{4})', dob_str)
+    if match:
+        return dob_str
+    
     return dob_str
 
-
-# ── STAGE 1: IMAGE PREPROCESSING (OpenCV) ─────────────────────
 def preprocess_document_image(image_bytes):
     """
-    OpenCV preprocessing pipeline:
-    • Decodes image bytes to numpy array
-    • Auto-rotates via EXIF data
-    • Upscales to min 1400px for clear OCR
-    • Converts to grayscale
-    • Bilateral filter (noise removal, keeps edges)
-    • Adaptive threshold (binarizes text)
-    Returns: (thresh_array, original_color_array, (w,h))
+    OpenCV preprocessing pipeline for better OCR clarity.
     """
     try:
         np_arr = np.frombuffer(image_bytes, np.uint8)
         img_cv = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
         if img_cv is None:
-            raise ValueError("Could not decode image")
+            return None, None, (0, 0)
 
         # Auto-rotate from EXIF using Pillow
         try:
@@ -633,27 +633,20 @@ def preprocess_document_image(image_bytes):
         if max(h, w) < 1400:
             scale = 1400 / max(h, w)
             img_cv = cv2.resize(img_cv, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_CUBIC)
-            print(f"  [Preprocess] Upscaled to {img_cv.shape[1]}x{img_cv.shape[0]}")
 
         original_cv = img_cv.copy()
         gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
         denoised = cv2.bilateralFilter(gray, 9, 75, 75)
         thresh = cv2.adaptiveThreshold(denoised, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
-        print(f"  [Preprocess] Output: {thresh.shape[1]}x{thresh.shape[0]}")
+        
         return thresh, original_cv, (thresh.shape[1], thresh.shape[0])
-
     except Exception as e:
-        print(f"  [Preprocess] Error: {e}")
+        print(f"Preprocess error: {e}")
         return None, None, (0, 0)
 
-
-# ── STAGE 2: OCR TEXT EXTRACTION (Gemini Vision) ──────────────
-def extract_text_with_gemini(image_bytes, preprocessed_arr):
+def extract_text_with_gemini(image_bytes):
     """
     Uses Gemini Vision as the OCR engine.
-    Runs OCR on both the preprocessed (thresholded) image AND the
-    original image bytes for maximum text coverage.
-    Returns combined raw text string.
     """
     if not GEMINI_API_KEY:
         return ""
@@ -661,296 +654,81 @@ def extract_text_with_gemini(image_bytes, preprocessed_arr):
         model = genai.GenerativeModel("gemini-1.5-flash")
         ocr_prompt = (
             "You are an OCR engine. Extract ALL visible text from this document image EXACTLY as it appears. "
-            "Include: names, ID numbers, dates, labels, addresses, Hindi/English text, everything. "
-            "Do NOT interpret or summarize. Output RAW TEXT ONLY."
+            "Output RAW TEXT ONLY. Include names, numbers, dates, and labels."
         )
-        # Send original image bytes for best quality
         b64 = base64.b64encode(image_bytes).decode("utf-8")
-        ext = 'image/jpeg'
-        image_part = {"inline_data": {"mime_type": ext, "data": b64}}
+        image_part = {"inline_data": {"mime_type": "image/jpeg", "data": b64}}
         response = model.generate_content([image_part, ocr_prompt])
-        text = response.text.strip() if response.text else ""
-        print(f"  [OCR] Gemini extracted {len(text)} chars")
-        print(f"  [OCR] Preview: {text[:250]}")
-        return text
+        return response.text.strip() if response.text else ""
     except Exception as e:
-        print(f"  [OCR] Gemini OCR error: {e}")
+        print(f"Gemini OCR error: {e}")
         return ""
 
-
-# ── STAGE 4: FRAUD / QUALITY CHECKS (OpenCV) ──────────────────
-def run_fraud_checks(original_img, image_bytes):
+def run_fraud_checks(original_img):
     """
-    Checks image quality using OpenCV:
-    1. Resolution: minimum 300x200px
-    2. Blur: Laplacian variance < 60 = too blurry
-    Returns: (is_ok: bool, message: str)
+    Basic quality checks via OpenCV.
     """
     if original_img is None:
-        return True, "Quality check skipped"
-
-    h, w = original_img.shape[:2]
-    if w < 300 or h < 200:
-        return False, f"Image too small ({w}x{h}px). Please upload a larger photo."
-
+        return True, "Check skipped"
+    
     gray = cv2.cvtColor(original_img, cv2.COLOR_BGR2GRAY)
     laplacian_var = cv2.Laplacian(gray, cv2.CV_64F).var()
-    print(f"  [Fraud] Blur score: {laplacian_var:.1f} (threshold: 60)")
-
     if laplacian_var < 60:
-        return False, f"Image too blurry (score {laplacian_var:.0f}). Please take a clearer photo."
+        return False, f"Image too blurry (score: {laplacian_var:.0f}). Please take a clearer photo."
+    
+    return True, "Quality OK"
 
-    return True, f"Quality OK (blur score: {laplacian_var:.0f})"
-
-
-
-def _normalize_dob(dob_str):
-    """Normalizes any date string to DD/MM/YYYY for consistent comparison."""
-    if not dob_str:
-        return ""
-    dob_str = dob_str.strip().replace("-", "/").replace(".", "/")
-    match = re.match(r'(\d{4})/(\d{2})/(\d{2})', dob_str)
-    if match:
-        return f"{match.group(3)}/{match.group(2)}/{match.group(1)}"
-    match = re.match(r'(\d{2})/(\d{2})/(\d{4})', dob_str)
-    if match:
-        return dob_str
-    return dob_str
-
-# ── STAGE 1: IMAGE PREPROCESSING (OpenCV) ─────────────────────
-def preprocess_document_image(image_bytes):
-    """
-    OpenCV preprocessing pipeline:
-    1. Decode image bytes to numpy array
-    2. Auto-rotate from EXIF
-    3. Upscale if too small
-    4. Convert to grayscale
-    5. Apply bilateral filter (removes noise, keeps edges)
-    6. Adaptive threshold to binarize text
-    Returns: (preprocessed_numpy_array, original_np_array, dimensions)
-    """
-    try:
-        # Decode from bytes
-        np_arr = np.frombuffer(image_bytes, np.uint8)
-        img_cv = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
-        if img_cv is None:
-            raise ValueError("Could not decode image")
-
-        # Auto-rotate from EXIF using Pillow
-        try:
-            pil_img = Image.open(io.BytesIO(image_bytes))
-            from PIL import ExifTags
-            for k in ExifTags.TAGS.keys():
-                if ExifTags.TAGS[k] == 'Orientation':
-                    break
-            exif = pil_img._getexif()
-            if exif and k in exif:
-                rot_map = {3: 180, 6: 270, 8: 90}
-                if exif[k] in rot_map:
-                    img_cv = cv2.rotate(img_cv, {180: cv2.ROTATE_180, 270: cv2.ROTATE_90_COUNTERCLOCKWISE, 90: cv2.ROTATE_90_CLOCKWISE}[rot_map[exif[k]]])
-        except Exception:
-            pass
-
-        # Upscale if too small (min 1400px on longest side for good OCR)
-        h, w = img_cv.shape[:2]
-        longest = max(h, w)
-        if longest < 1400:
-            scale = 1400 / longest
-            img_cv = cv2.resize(img_cv, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_CUBIC)
-            print(f"  [Preprocess] Upscaled to {img_cv.shape[1]}x{img_cv.shape[0]}")
-
-        original_cv = img_cv.copy()
-
-        # Convert to grayscale
-        gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
-
-        # Bilateral filter — removes noise while preserving text edges
-        denoised = cv2.bilateralFilter(gray, 9, 75, 75)
-
-        # Adaptive threshold — binarizes image for better OCR on varied backgrounds
-        thresh = cv2.adaptiveThreshold(
-            denoised, 255,
-            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-            cv2.THRESH_BINARY, 11, 2
-        )
-
-        print(f"  [Preprocess] Final size: {thresh.shape[1]}x{thresh.shape[0]}")
-        return thresh, original_cv, (thresh.shape[1], thresh.shape[0])
-
-    except Exception as e:
-        print(f"  [Preprocess] Error: {e}")
-        return None, None, (0, 0)
-
-
-# ── STAGE 2: OCR TEXT EXTRACTION (Tesseract) ──────────────────
-def extract_text_from_image(preprocessed_img, original_img):
-    """
-    Runs Tesseract OCR on:
-    1. Preprocessed (thresholded) image for clear text
-    2. Original grayscale for context fallback
-    Returns combined extracted text.
-    """
-    try:
-        # Config: Page segmentation mode 3 (auto), OEM 3 (best LSTM engine)
-        # Language: English + Hindi (for Aadhaar)
-        config = r'--oem 3 --psm 3 -l eng+hin'
-        text1 = pytesseract.image_to_string(preprocessed_img, config=config)
-
-        # Also run on original grayscale for better coverage
-        if original_img is not None:
-            gray_orig = cv2.cvtColor(original_img, cv2.COLOR_BGR2GRAY)
-            text2 = pytesseract.image_to_string(gray_orig, config=config)
-            combined = text1 + "\n" + text2
-        else:
-            combined = text1
-
-        print(f"  [OCR] Extracted {len(combined)} chars")
-        print(f"  [OCR] Text preview: {combined[:300].strip()}")
-        return combined
-
-    except Exception as e:
-        print(f"  [OCR] Tesseract error: {e}")
-        return ""
-
-
-# ── STAGE 3: FRAUD / QUALITY CHECKS ───────────────────────────
-def run_fraud_checks(original_img, image_bytes):
-    """
-    Checks:
-    1. Blur detection via Laplacian variance (< 80 = too blurry)
-    2. Resolution check (minimum 400x300 pixels)
-    Returns: (is_ok: bool, reason: str)
-    """
-    warnings = []
-
-    # Resolution check
-    if original_img is not None:
-        h, w = original_img.shape[:2]
-        if w < 300 or h < 200:
-            return False, f"Image too small ({w}x{h}px). Minimum 300x200px required."
-
-        # Blur detection
-        gray = cv2.cvtColor(original_img, cv2.COLOR_BGR2GRAY)
-        laplacian_var = cv2.Laplacian(gray, cv2.CV_64F).var()
-        print(f"  [Fraud] Blur score (Laplacian variance): {laplacian_var:.1f}")
-        if laplacian_var < 80:
-            return False, f"Image is too blurry (blur score: {laplacian_var:.0f}/100). Please upload a clearer photo."
-
-        # File size sanity check (< 2KB is suspiciously small)
-        if len(image_bytes) < 2048:
-            warnings.append("Very small file size")
-
-    return True, " | ".join(warnings) if warnings else "Quality checks passed"
-
-
-# ── FULL PIPELINE ENTRY POINT ──────────────────────────────────
 def verify_document_with_gemini(image_bytes, document_type, filename="document.jpg"):
     """
-    Full 5-Stage OCR + AI Document Verification Pipeline:
-    Stage 1: OpenCV Image Preprocessing
-    Stage 2: Tesseract OCR Text Extraction
-    Stage 3: Regex-Based Document Format Validation
-    Stage 4: Fraud / Quality / Blur Detection
-    Stage 5: Final Verification Result
-    Returns: (is_valid: bool, reason: str, extracted_dob: str)
+    Main verification pipeline.
     """
-    print(f"\n{'='*55}")
-    print(f"📋 DOCUMENT VERIFICATION: {document_type}")
-    print(f"{'='*55}")
+    print(f"🔍 Verifying {document_type}...")
+    
+    # Stage 1: Preprocess to check image validity
+    thresh, original_cv, dims = preprocess_document_image(image_bytes)
+    if original_cv is None:
+        return False, "Could not read image file", ""
 
-    extracted_dob = ""
-
-    # ── STAGE 1: OPENCV PREPROCESSING ─────────────────
-    print("[Stage 1] OpenCV Image Preprocessing...")
-    preprocessed, original_cv, dims = preprocess_document_image(image_bytes)
-    if preprocessed is None:
-        return False, "Could not read the image file. Please upload a valid JPG or PNG.", ""
-    print(f"  Dimensions after preprocessing: {dims}")
-
-    # ── STAGE 2: TESSERACT OCR ────────────────────────
-    print("[Stage 2] Tesseract OCR Text Extraction...")
-    extracted_text = extract_text_from_image(preprocessed, original_cv)
-
-    if not extracted_text.strip():
-        return False, "Could not extract any text from the image. Please upload a clearer photo.", ""
-
-    # ── STAGE 3: REGEX DOCUMENT VALIDATION ────────────
-    print("[Stage 3] Regex Document Format Validation...")
-    is_valid_format = False
-    format_reason = ""
-    text_upper = extracted_text.upper()
-
-    if "Aadhaar" in document_type:
-        # Aadhaar patterns
-        aadhaar_full    = re.compile(r'\d{4}\s\d{4}\s\d{4}')
-        aadhaar_compact = re.compile(r'\d{12}')
-        aadhaar_masked  = re.compile(r'[Xx]{4}\s*[Xx]{4}\s*\d{4}')
-        dob_regex       = re.compile(r'(\d{2}[/\-\.]\d{2}[/\-\.]\d{4}|\d{4}[/\-\.]\d{2}[/\-\.]\d{2})')
-
-        has_num    = bool(aadhaar_full.search(extracted_text) or
-                         aadhaar_compact.search(extracted_text) or
-                         aadhaar_masked.search(extracted_text))
-        has_dob    = bool(dob_regex.search(extracted_text))
-        has_gender = any(g in text_upper for g in ['MALE', 'FEMALE', 'पुरुष', 'महिला'])
-        has_uidai  = any(m in text_upper for m in ['AADHAAR', 'AADHAR', 'UIDAI', 'आधार', 'UNIQUE IDENTIFICATION'])
-        has_dob_label = any(d in text_upper for d in ['DOB', 'DATE OF BIRTH', 'जन्म', 'D.O.B'])
-        has_name   = len(extracted_text.strip()) > 15
-
-        score = (has_num * 4 + has_uidai * 3 + has_gender * 1 +
-                 has_dob * 1 + has_dob_label * 1 + has_name * 1)
-
-        dob_match = dob_regex.search(extracted_text)
-        if dob_match:
-            extracted_dob = _normalize_dob(dob_match.group())
-
-        print(f"  Aadhaar score: {score}/11 | num={has_num}, UIDAI={has_uidai}, gender={has_gender}, DOB={has_dob}")
-
-        if score >= 2:
-            is_valid_format = True
-            format_reason = f"✅ Aadhaar verified (score {score}/11, DOB: {extracted_dob or 'not found'})"
-        else:
-            is_valid_format = False
-            format_reason = (f"❌ Aadhaar not confirmed (score {score}/11). "
-                             f"Detected: number={'Yes' if has_num else 'No'}, "
-                             f"UIDAI={'Yes' if has_uidai else 'No'}, "
-                             f"Gender={'Yes' if has_gender else 'No'}. "
-                             f"Ensure full card image with number, name, and DOB is visible.")
-
-    else:  # PAN Card
-        pan_regex = re.compile(r'[A-Z]{5}[0-9]{4}[A-Z]')
-        dob_regex = re.compile(r'(\d{2}[/\-\.]\d{2}[/\-\.]\d{4}|\d{4}[/\-\.]\d{2}[/\-\.]\d{2})')
-        has_pan_label = any(m in text_upper for m in ['INCOME TAX', 'PERMANENT ACCOUNT', 'PAN'])
-
-        pan_match = pan_regex.search(text_upper)
-        dob_match = dob_regex.search(extracted_text)
-        if dob_match:
-            extracted_dob = _normalize_dob(dob_match.group())
-
-        if pan_match:
-            pan_number = pan_match.group()
-            is_valid_format = True
-            format_reason = f"✅ PAN verified: {pan_number} (DOB: {extracted_dob or 'not found'})"
-            print(f"  PAN number found: {pan_number}")
-        else:
-            is_valid_format = False
-            # Show what was extracted to help debug
-            format_reason = (f"❌ No valid PAN number (ABCDE1234F format) found. "
-            print(f"  No PAN number in OCR output")
-
-    print(f"  Stage 3: {format_reason}")
-
-    # ── STAGE 4: BLUR / RESOLUTION FRAUD CHECKS ───────
-    print("[Stage 4] Fraud & Quality Checks...")
-    quality_ok, quality_msg = run_fraud_checks(original_cv, image_bytes)
-    print(f"  Quality: {quality_msg}")
-
+    # Stage 2: Quality/Fraud Checks
+    quality_ok, quality_msg = run_fraud_checks(original_cv)
     if not quality_ok:
         return False, quality_msg, ""
 
-    # ── STAGE 5: FINAL RESULT ──────────────────────────
-    print("[Stage 5] Final Result...")
-    print(f"{'='*55}\n")
-    return is_valid_format, format_reason, extracted_dob
+    # Stage 3: OCR
+    extracted_text = extract_text_with_gemini(image_bytes)
+    if not extracted_text:
+        return False, "Could not extract text from document", ""
+
+    # Stage 4: Regex Validation
+    is_valid = False
+    reason = ""
+    extracted_dob = ""
+    text_upper = extracted_text.upper()
+
+    dob_regex = re.compile(r'(\d{2}[/\-\.]\d{2}[/\-\.]\d{4}|\d{4}[/\-\.]\d{2}[/\-\.]\d{2})')
+    dob_match = dob_regex.search(extracted_text)
+    if dob_match:
+        extracted_dob = _normalize_dob(dob_match.group())
+
+    if "Aadhaar" in document_type:
+        has_num = bool(re.search(r'\d{4}\s\d{4}\s\d{4}|\d{12}|[Xx]{4}\s*[Xx]{4}\s*\d{4}', extracted_text))
+        has_uidai = any(m in text_upper for m in ['AADHAAR', 'AADHAR', 'UIDAI', 'आधार'])
+        
+        score = (has_num * 5 + has_uidai * 5)
+        if score >= 5:
+            is_valid = True
+            reason = f"Aadhaar verified (score {score}/10)"
+        else:
+            reason = "Document does not look like a valid Aadhaar card"
+    else:
+        pan_regex = re.compile(r'[A-Z]{5}[0-9]{4}[A-Z]')
+        if pan_regex.search(text_upper):
+            is_valid = True
+            reason = f"PAN verified"
+        else:
+            reason = "No valid PAN number found"
+
+    return is_valid, reason, extracted_dob
 
     if is_valid_format:
         final_result = True
