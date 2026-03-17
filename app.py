@@ -11,8 +11,8 @@ from bson import ObjectId
 import io
 import base64
 
-# In-memory job store for async document verification
-_verification_jobs = {}
+# NOTE: Job results are stored in MongoDB (not memory)
+# so they survive Gunicorn worker restarts on Render free tier.
 
 # Image processing for document verification pipeline
 from PIL import Image, ImageEnhance, ImageFilter
@@ -851,7 +851,7 @@ def verify_document_with_gemini(image_bytes, document_type, filename="document.j
 
 # ==================================================
 # 👤 SAVE / UPDATE USER PROFILE (Async — avoids Render 30s timeout)
-# Returns immediately with status "processing".
+# Job results stored in MongoDB so they survive worker restarts.
 # Flutter should poll /verification_status/<job_id> every 4 seconds.
 # ==================================================
 @app.route('/save_profile', methods=['POST'])
@@ -870,7 +870,13 @@ def save_profile():
         phone         = request.form.get("phone", "")
 
         job_id = email  # use email as unique job key
-        _verification_jobs[job_id] = {"status": "processing"}
+
+        # Store job status in MongoDB — survives Gunicorn worker restarts
+        db["verification_jobs"].update_one(
+            {"job_id": job_id},
+            {"$set": {"job_id": job_id, "status": "processing", "updated_at": datetime.utcnow()}},
+            upsert=True
+        )
 
         def run_verification():
             try:
@@ -920,12 +926,30 @@ def save_profile():
 
                 users_col.update_one({"email": email}, {"$set": update_doc}, upsert=True)
                 profile = users_col.find_one({"email": email}, {"_id": 0, "password": 0})
-                _verification_jobs[job_id] = {"status": "done", "profile": profile}
+
+                # Save result to MongoDB
+                db["verification_jobs"].update_one(
+                    {"job_id": job_id},
+                    {"$set": {
+                        "status": "done",
+                        "profile": profile,
+                        "updated_at": datetime.utcnow()
+                    }},
+                    upsert=True
+                )
                 print(f"✅ Verification job complete for {email}")
 
             except Exception as e:
                 print(f"❌ Verification job error for {email}: {e}")
-                _verification_jobs[job_id] = {"status": "error", "message": str(e)}
+                db["verification_jobs"].update_one(
+                    {"job_id": job_id},
+                    {"$set": {
+                        "status": "error",
+                        "message": str(e),
+                        "updated_at": datetime.utcnow()
+                    }},
+                    upsert=True
+                )
 
         # Launch in background thread — returns 202 instantly to Flutter
         threading.Thread(target=run_verification, daemon=True).start()
@@ -939,14 +963,18 @@ def save_profile():
 # ==================================================
 # 🔄 VERIFICATION STATUS POLL ENDPOINT
 # Flutter calls this every 4s after receiving "processing"
+# Results fetched from MongoDB — survives worker restarts
 # ==================================================
 @app.route('/verification_status/<job_id>', methods=['GET'])
 @cross_origin()
 def verification_status(job_id):
-    job = _verification_jobs.get(job_id)
-    if not job:
-        return jsonify({"status": "not_found"}), 404
-    return jsonify(job)
+    try:
+        job = db["verification_jobs"].find_one({"job_id": job_id}, {"_id": 0})
+        if not job:
+            return jsonify({"status": "processing"}), 200  # Still starting up
+        return jsonify(job)
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 
 # ==================================================
