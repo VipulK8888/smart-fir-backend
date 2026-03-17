@@ -1,5 +1,6 @@
 import os
 import re
+import threading
 from datetime import datetime
 
 from flask import Flask, request, jsonify, send_from_directory, send_file, make_response
@@ -9,6 +10,9 @@ import gridfs
 from bson import ObjectId
 import io
 import base64
+
+# In-memory job store for async document verification
+_verification_jobs = {}
 
 # Image processing for document verification pipeline
 from PIL import Image, ImageEnhance, ImageFilter
@@ -899,7 +903,9 @@ def verify_document_with_gemini(image_bytes, document_type, filename="document.j
 
 
 # ==================================================
-# 👤 SAVE / UPDATE USER PROFILE
+# 👤 SAVE / UPDATE USER PROFILE (Async — avoids Render 30s timeout)
+# Returns immediately with status "processing".
+# Flutter should poll /verification_status/<job_id> every 4 seconds.
 # ==================================================
 @app.route('/save_profile', methods=['POST'])
 @cross_origin()
@@ -909,77 +915,91 @@ def save_profile():
         if not email:
             return jsonify({"status": "error", "message": "Email is required"}), 400
 
-        name = request.form.get("name", "")
-        dob = request.form.get("dob", "")
-        phone = request.form.get("phone", "")
+        # Read ALL file bytes NOW — request context closes after this function returns
+        aadhaar_bytes = request.files["aadhaar_image"].read() if "aadhaar_image" in request.files else None
+        pan_bytes     = request.files["pan_image"].read()     if "pan_image"     in request.files else None
+        name          = request.form.get("name", "")
+        dob           = request.form.get("dob", "")
+        phone         = request.form.get("phone", "")
 
-        # Fetch existing profile to preserve data
-        existing_profile = users_col.find_one({"email": email}) or {}
-        
-        update_doc = {
-            "name": name or existing_profile.get("name", ""),
-            "dob": dob or existing_profile.get("dob", ""),
-            "phone": phone or existing_profile.get("phone", ""),
-        }
+        job_id = email  # use email as unique job key
+        _verification_jobs[job_id] = {"status": "processing"}
 
-        # --- Process Aadhaar Image ---
-        aadhaar_dob = existing_profile.get("aadhaar_dob", "")
-        if "aadhaar_image" in request.files:
-            aadhaar_file = request.files["aadhaar_image"]
-            aadhaar_bytes = aadhaar_file.read()
-            
-            # Clean old file
-            if existing_profile.get("aadhaar_id"):
-                try: fs.delete(ObjectId(existing_profile["aadhaar_id"]))
-                except: pass
-                
-            aadhaar_id = fs.put(aadhaar_bytes, filename="aadhaar.jpg", content_type="image/jpeg")
-            aadhaar_verified, _, aadhaar_dob = verify_document_with_gemini(aadhaar_bytes, "Aadhaar Card")
-            
-            update_doc["aadhaar_id"] = str(aadhaar_id)
-            update_doc["aadhaar_verified"] = aadhaar_verified
-            update_doc["aadhaar_dob"] = aadhaar_dob
+        def run_verification():
+            try:
+                existing_profile = users_col.find_one({"email": email}) or {}
+                update_doc = {
+                    "name":  name  or existing_profile.get("name", ""),
+                    "dob":   dob   or existing_profile.get("dob", ""),
+                    "phone": phone or existing_profile.get("phone", ""),
+                }
 
-        # --- Process PAN Image ---
-        pan_dob = existing_profile.get("pan_dob", "")
-        if "pan_image" in request.files:
-            pan_file = request.files["pan_image"]
-            pan_bytes = pan_file.read()
-            
-            # Clean old file
-            if existing_profile.get("pan_id"):
-                try: fs.delete(ObjectId(existing_profile["pan_id"]))
-                except: pass
-                
-            pan_id = fs.put(pan_bytes, filename="pan.jpg", content_type="image/jpeg")
-            pan_verified, _, pan_dob = verify_document_with_gemini(pan_bytes, "PAN Card")
-            
-            update_doc["pan_id"] = str(pan_id)
-            update_doc["pan_verified"] = pan_verified
-            update_doc["pan_dob"] = pan_dob
+                # --- Process Aadhaar Image ---
+                if aadhaar_bytes:
+                    if existing_profile.get("aadhaar_id"):
+                        try: fs.delete(ObjectId(existing_profile["aadhaar_id"]))
+                        except: pass
+                    aadhaar_id = fs.put(aadhaar_bytes, filename="aadhaar.jpg", content_type="image/jpeg")
+                    aadhaar_verified, _, aadhaar_dob = verify_document_with_gemini(aadhaar_bytes, "Aadhaar Card")
+                    update_doc["aadhaar_id"]       = str(aadhaar_id)
+                    update_doc["aadhaar_verified"] = aadhaar_verified
+                    update_doc["aadhaar_dob"]      = aadhaar_dob
 
-        # ---- Cross-Document DOB Matching ----
-        # If we have both DOBs (either from this request or pre-existing)
-        final_aadhaar_dob = update_doc.get("aadhaar_dob", existing_profile.get("aadhaar_dob", ""))
-        final_pan_dob     = update_doc.get("pan_dob",     existing_profile.get("pan_dob", ""))
-        
-        if final_aadhaar_dob and final_pan_dob:
-            if final_aadhaar_dob != final_pan_dob:
-                print(f"❌ DOB Mismatch! '{final_aadhaar_dob}' vs '{final_pan_dob}'")
-                update_doc["aadhaar_verified"] = False
-                update_doc["pan_verified"] = False
-                update_doc["verification_failure_reason"] = f"DOB mismatch: Aadhaar ({final_aadhaar_dob}) != PAN ({final_pan_dob})."
-            else:
-                print(f"✅ DOB Match: {final_aadhaar_dob}")
-                update_doc["verification_failure_reason"] = None
+                # --- Process PAN Image ---
+                if pan_bytes:
+                    if existing_profile.get("pan_id"):
+                        try: fs.delete(ObjectId(existing_profile["pan_id"]))
+                        except: pass
+                    pan_id = fs.put(pan_bytes, filename="pan.jpg", content_type="image/jpeg")
+                    pan_verified, _, pan_dob = verify_document_with_gemini(pan_bytes, "PAN Card")
+                    update_doc["pan_id"]       = str(pan_id)
+                    update_doc["pan_verified"] = pan_verified
+                    update_doc["pan_dob"]      = pan_dob
 
-        users_col.update_one({"email": email}, {"$set": update_doc}, upsert=True)
-        profile = users_col.find_one({"email": email}, {"_id": 0, "password": 0})
-        return jsonify({"status": "success", "profile": profile})
+                # ---- Cross-Document DOB Matching ----
+                final_aadhaar_dob = update_doc.get("aadhaar_dob", existing_profile.get("aadhaar_dob", ""))
+                final_pan_dob     = update_doc.get("pan_dob",     existing_profile.get("pan_dob", ""))
+                if final_aadhaar_dob and final_pan_dob:
+                    if final_aadhaar_dob != final_pan_dob:
+                        print(f"❌ DOB Mismatch! '{final_aadhaar_dob}' vs '{final_pan_dob}'")
+                        update_doc["aadhaar_verified"] = False
+                        update_doc["pan_verified"]     = False
+                        update_doc["verification_failure_reason"] = (
+                            f"DOB mismatch: Aadhaar ({final_aadhaar_dob}) != PAN ({final_pan_dob})."
+                        )
+                    else:
+                        print(f"✅ DOB Match: {final_aadhaar_dob}")
+                        update_doc["verification_failure_reason"] = None
+
+                users_col.update_one({"email": email}, {"$set": update_doc}, upsert=True)
+                profile = users_col.find_one({"email": email}, {"_id": 0, "password": 0})
+                _verification_jobs[job_id] = {"status": "done", "profile": profile}
+                print(f"✅ Verification job complete for {email}")
+
+            except Exception as e:
+                print(f"❌ Verification job error for {email}: {e}")
+                _verification_jobs[job_id] = {"status": "error", "message": str(e)}
+
+        # Launch in background thread — returns 202 instantly to Flutter
+        threading.Thread(target=run_verification, daemon=True).start()
+        return jsonify({"status": "processing", "job_id": job_id}), 202
 
     except Exception as e:
         print(f"save_profile error: {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
+
+
+# ==================================================
+# 🔄 VERIFICATION STATUS POLL ENDPOINT
+# Flutter calls this every 4s after receiving "processing"
+# ==================================================
+@app.route('/verification_status/<job_id>', methods=['GET'])
+@cross_origin()
+def verification_status(job_id):
+    job = _verification_jobs.get(job_id)
+    if not job:
+        return jsonify({"status": "not_found"}), 404
+    return jsonify(job)
 
 
 # ==================================================
@@ -1119,6 +1139,10 @@ def home():
 # RUN
 # ==================================================
 if __name__ == '__main__':
+    # Pre-warm EasyOCR at startup so the first verification request doesn't timeout
+    print("Pre-warming EasyOCR model on startup...")
+    _get_ocr_reader()
+    print("EasyOCR pre-warm complete ✅")
     # Cloud providers like Render supply a PORT env variable
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
