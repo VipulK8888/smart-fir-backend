@@ -766,7 +766,7 @@ def verify_document_with_ai(image_bytes, document_type):
 
     print(f"  [Gemini AI] Analysing {document_type}…")
     try:
-        model  = genai.GenerativeModel("gemini-1.5-flash")
+        model  = genai.GenerativeModel("gemini-2.0-flash")
         prompt = (
             f"You are an expert Indian Document Analyst verifying an Indian {document_type}.\n\n"
             "TASK:\n"
@@ -1026,7 +1026,7 @@ def chat():
         messages = data["messages"]
         
         # 1. Dynamically find the best model for this particular API Key
-        chat_model_name = "gemini-1.5-flash" # Default fallback
+        chat_model_name = "gemini-2.0-flash" # Default fallback
         try:
             available_models = genai.list_models()
             valid_models = [m.name for m in available_models if 'generateContent' in m.supported_generation_methods]
@@ -1036,7 +1036,7 @@ def chat():
                 chat_model_name = valid_models[0] # Pick the first available
                 # Prefer flash or pro if available
                 for name in valid_models:
-                    if 'gemini-1.5-flash' in name:
+                    if 'gemini-2.0-flash' in name:
                         chat_model_name = name
                         break
         except Exception as e:
