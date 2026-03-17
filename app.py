@@ -757,63 +757,79 @@ def run_fraud_checks(original_img):
 
 def verify_document_with_ai(image_bytes, document_type):
     """
-    Sends the OpenCV-enhanced image to Gemini 1.5 Flash.
+    Sends the OpenCV-enhanced image to Gemini 2.0 Flash.
     Gemini extracts Name, DOB, Document Number and validates authenticity.
+    Auto-retries up to 3 times on quota/rate-limit errors with backoff.
     Returns (is_valid: bool, message: str, dob: str)
     """
     if not GEMINI_API_KEY:
         return False, "Gemini API key not configured on server", ""
 
-    print(f"  [Gemini AI] Analysing {document_type}…")
-    try:
-        model  = genai.GenerativeModel("gemini-2.0-flash")
-        prompt = (
-            f"You are an expert Indian Document Analyst verifying an Indian {document_type}.\n\n"
-            "TASK:\n"
-            "1. Confirm the image shows the correct document type.\n"
-            "2. Extract: Full Name, Date of Birth (DD/MM/YYYY), Document Number.\n"
-            "3. Verify Name and DOB are present and consistent.\n\n"
-            "LENIENCY RULES:\n"
-            "- Background clutter, shadows, or slight angles are ACCEPTABLE.\n"
-            "- Only reject if the document type is completely wrong or totally unreadable.\n\n"
-            "Return ONLY raw JSON (no markdown fences) in this exact format:\n"
-            '{"is_valid": bool, "name": "string", "dob": "DD/MM/YYYY", '
-            '"number": "string", "reason": "string"}'
-        )
+    import time
+    max_retries = 3
+    retry_delays = [20, 40, 60]  # seconds between retries on quota error
 
-        b64_image  = base64.b64encode(image_bytes).decode("utf-8")
-        image_part = {"inline_data": {"mime_type": "image/jpeg", "data": b64_image}}
+    for attempt in range(max_retries):
+        print(f"  [Gemini AI] Analysing {document_type} (attempt {attempt + 1}/{max_retries})…")
+        try:
+            model  = genai.GenerativeModel("gemini-2.0-flash")
+            prompt = (
+                f"You are an expert Indian Document Analyst verifying an Indian {document_type}.\n\n"
+                "TASK:\n"
+                "1. Confirm the image shows the correct document type.\n"
+                "2. Extract: Full Name, Date of Birth (DD/MM/YYYY), Document Number.\n"
+                "3. Verify Name and DOB are present and consistent.\n\n"
+                "LENIENCY RULES:\n"
+                "- Background clutter, shadows, or slight angles are ACCEPTABLE.\n"
+                "- Only reject if the document type is completely wrong or totally unreadable.\n\n"
+                "Return ONLY raw JSON (no markdown fences) in this exact format:\n"
+                '{"is_valid": bool, "name": "string", "dob": "DD/MM/YYYY", '
+                '"number": "string", "reason": "string"}'
+            )
 
-        response = model.generate_content([image_part, prompt])
-        raw_json = response.text.strip()
+            b64_image  = base64.b64encode(image_bytes).decode("utf-8")
+            image_part = {"inline_data": {"mime_type": "image/jpeg", "data": b64_image}}
 
-        # Strip accidental markdown fences
-        if "```json" in raw_json:
-            raw_json = raw_json.split("```json")[1].split("```")[0].strip()
-        elif "```" in raw_json:
-            raw_json = raw_json.split("```")[1].split("```")[0].strip()
+            response = model.generate_content([image_part, prompt])
+            raw_json = response.text.strip()
 
-        print(f"  [Gemini AI] Raw response: {raw_json}")
-        ai_data  = json.loads(raw_json)
+            # Strip accidental markdown fences
+            if "```json" in raw_json:
+                raw_json = raw_json.split("```json")[1].split("```")[0].strip()
+            elif "```" in raw_json:
+                raw_json = raw_json.split("```")[1].split("```")[0].strip()
 
-        is_valid = ai_data.get("is_valid", False)
-        reason   = ai_data.get("reason", "Unknown reason")
-        dob      = _normalize_dob(ai_data.get("dob", ""))
-        number   = ai_data.get("number", "")
+            print(f"  [Gemini AI] Raw response: {raw_json}")
+            ai_data  = json.loads(raw_json)
 
-        # ── Stage 3: Regex cross-validate Gemini output ──────────
-        number, dob = _regex_validate(number, dob, document_type)
+            is_valid = ai_data.get("is_valid", False)
+            reason   = ai_data.get("reason", "Unknown reason")
+            dob      = _normalize_dob(ai_data.get("dob", ""))
+            number   = ai_data.get("number", "")
 
-        if is_valid:
-            print(f"  ✅ [Gemini AI] Verified — Number: {number} | DOB: {dob}")
-            return True, f"Verified: {number}", dob
-        else:
-            print(f"  ❌ [Gemini AI] Rejected — {reason}")
-            return False, f"Invalid: {reason}", ""
+            # Stage 3: Regex cross-validate Gemini output
+            number, dob = _regex_validate(number, dob, document_type)
 
-    except Exception as e:
-        print(f"  ⚠️ [Gemini AI] Error: {e}")
-        return False, f"AI Analysis Error: {str(e)}", ""
+            if is_valid:
+                print(f"  ✅ [Gemini AI] Verified — Number: {number} | DOB: {dob}")
+                return True, f"Verified: {number}", dob
+            else:
+                print(f"  ❌ [Gemini AI] Rejected — {reason}")
+                return False, f"Invalid: {reason}", ""
+
+        except Exception as e:
+            error_str = str(e)
+            is_quota_error = any(k in error_str.lower() for k in
+                                 ["429", "quota", "rate", "limit", "resource_exhausted"])
+            if is_quota_error and attempt < max_retries - 1:
+                wait = retry_delays[attempt]
+                print(f"  ⏳ [Gemini AI] Quota hit — waiting {wait}s before retry…")
+                time.sleep(wait)
+                continue  # retry
+            print(f"  ⚠️ [Gemini AI] Error: {error_str}")
+            return False, f"AI Analysis Error: {error_str}", ""
+
+    return False, "Gemini quota exceeded after retries. Please try again in a minute.", ""
 
 # ── MAIN ENTRY POINT ─────────────────────────────────────────────
 
@@ -972,6 +988,9 @@ def verification_status(job_id):
         job = db["verification_jobs"].find_one({"job_id": job_id}, {"_id": 0})
         if not job:
             return jsonify({"status": "processing"}), 200  # Still starting up
+        # Return "success" instead of "done" for Flutter compatibility
+        if job.get("status") == "done":
+            job["status"] = "success"
         return jsonify(job)
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
