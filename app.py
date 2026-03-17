@@ -60,8 +60,30 @@ except OSError:
     nlp = spacy.load("en_core_web_sm")
 
 app = Flask(__name__)
-# Enable CORS so Flutter Web can communicate with the backend
-CORS(app)
+
+# ── CORS — allow Flutter Web (any origin) to POST multipart/form-data ──
+CORS(app,
+     resources={r"/*": {"origins": "*"}},
+     allow_headers=["Content-Type", "Authorization", "Accept"],
+     methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+     supports_credentials=False)
+
+# Handle OPTIONS preflight for every route explicitly
+@app.before_request
+def handle_preflight():
+    if request.method == "OPTIONS":
+        res = app.make_default_options_response()
+        res.headers["Access-Control-Allow-Origin"]  = "*"
+        res.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
+        res.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, Accept"
+        return res
+
+@app.after_request
+def add_cors_headers(response):
+    response.headers["Access-Control-Allow-Origin"]  = "*"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, Accept"
+    return response
 
 # ==================================================
 # 🔗 MongoDB Connection
@@ -582,35 +604,18 @@ def get_fir(fir_id):
         return jsonify({"status": "error", "message": str(e)}), 500
 
 # ==================================================
-# 🛠️ DOCUMENT VERIFICATION — OpenCV + EasyOCR + Regex + Gemini AI
-# Multi-Stage Pipeline:
-#   Stage 1 → OpenCV Image Enhancement
-#   Stage 2 → EasyOCR Text Extraction
-#   Stage 3 → Regex Layer (Aadhaar / PAN structured identifiers)
-#   Stage 4 → Gemini AI Semantic Cross-Check (Name / DOB / Authenticity)
+# 🛠️ DOCUMENT VERIFICATION — OpenCV + Regex + Gemini AI
+# 3-Stage Pipeline (EasyOCR removed — too heavy for Render free tier):
+#   Stage 1 → OpenCV Image Enhancement + Quality Check
+#   Stage 2 → Gemini AI extracts text + validates document
+#   Stage 3 → Regex validates Gemini's extracted number / DOB
 # ==================================================
 import cv2
 import numpy as np
 import json
 from PIL import Image, ImageEnhance
 
-# Lazy-load EasyOCR reader to avoid heavy startup cost
-_easyocr_reader = None
-
-def _get_ocr_reader():
-    """Returns a singleton EasyOCR reader (English + Hindi support)."""
-    global _easyocr_reader
-    if _easyocr_reader is None:
-        try:
-            import easyocr
-            print("  [OCR] Initialising EasyOCR reader (en + hi)…")
-            _easyocr_reader = easyocr.Reader(["en", "hi"], gpu=False)
-            print("  [OCR] EasyOCR ready.")
-        except ImportError:
-            print("  [OCR] ⚠️  EasyOCR not installed — OCR stage will be skipped.")
-    return _easyocr_reader
-
-# ── HELPERS ─────────────────────────────────────────────────────
+# ── HELPERS ──────────────────────────────────────────────────────
 
 def _normalize_dob(dob_str):
     """Normalises any date string (including month names) to DD/MM/YYYY."""
@@ -627,21 +632,65 @@ def _normalize_dob(dob_str):
             return f"{match.group(1).zfill(2)}/{match.group(2).zfill(2)}/{match.group(3)}"
         return dob_str
 
+# Regex patterns for post-AI validation
+_AADHAAR_RE = re.compile(r'\b(\d{4}[\s\-]?\d{4}[\s\-]?\d{4})\b')
+_PAN_RE     = re.compile(r'\b([A-Z]{5}[0-9]{4}[A-Z])\b')
+_DOB_RE     = re.compile(
+    r'\b(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{4})'
+    r'|\b(\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{4})\b',
+    re.IGNORECASE,
+)
+
+def _regex_validate(number, dob, document_type):
+    """
+    Cross-checks Gemini's extracted number and DOB against Regex patterns.
+    Returns (number, dob) — corrected or original.
+    """
+    if number:
+        if "aadhaar" in document_type.lower():
+            m = _AADHAAR_RE.search(number)
+            if m:
+                number = re.sub(r'[\s\-]', '', m.group(1))
+                print(f"  [Regex] Aadhaar number validated: {number}")
+            else:
+                print(f"  [Regex] ⚠️ Aadhaar number format mismatch: {number}")
+        elif "pan" in document_type.lower():
+            m = _PAN_RE.search(number.upper())
+            if m:
+                number = m.group(1)
+                print(f"  [Regex] PAN number validated: {number}")
+            else:
+                print(f"  [Regex] ⚠️ PAN number format mismatch: {number}")
+
+    if dob:
+        dob_match = _DOB_RE.search(dob)
+        if dob_match:
+            raw = dob_match.group(1) or dob_match.group(2)
+            dob = _normalize_dob(raw)
+            print(f"  [Regex] DOB validated: {dob}")
+        else:
+            # Try normalising as-is
+            dob = _normalize_dob(dob)
+            print(f"  [Regex] DOB normalised: {dob}")
+
+    return number, dob
+
 # ── STAGE 1: OPENCV IMAGE ENHANCEMENT ───────────────────────────
 
 def preprocess_document_image(image_bytes):
     """
-    OpenCV preprocessing pipeline:
+    OpenCV pipeline:
     - EXIF auto-rotation
     - Upscaling for low-res images
+    - Resize large images to max 1600px (saves Gemini bandwidth)
     - Grayscale → Bilateral denoising → Adaptive thresholding
-    Returns (thresh_img, original_cv, (width, height))
+    Returns (enhanced_bytes, original_cv, (width, height))
     """
     try:
         np_arr = np.frombuffer(image_bytes, np.uint8)
         img_cv = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
         if img_cv is None:
-            return None, None, (0, 0)
+            return image_bytes, None, (0, 0)
 
         # Auto-rotate using EXIF orientation tag
         try:
@@ -662,37 +711,40 @@ def preprocess_document_image(image_bytes):
         except Exception:
             pass
 
-        # Upscale if the longest dimension is under 1400 px
         h, w = img_cv.shape[:2]
-        if max(h, w) < 1400:
-            scale = 1400 / max(h, w)
-            img_cv = cv2.resize(
-                img_cv,
-                (int(w * scale), int(h * scale)),
-                interpolation=cv2.INTER_CUBIC,
-            )
+
+        # Upscale if too small
+        if max(h, w) < 1000:
+            scale  = 1000 / max(h, w)
+            img_cv = cv2.resize(img_cv, (int(w * scale), int(h * scale)),
+                                interpolation=cv2.INTER_CUBIC)
+            h, w = img_cv.shape[:2]
+
+        # Downscale if too large (saves Gemini API bandwidth & speeds up response)
+        if max(h, w) > 1600:
+            scale  = 1600 / max(h, w)
+            img_cv = cv2.resize(img_cv, (int(w * scale), int(h * scale)),
+                                interpolation=cv2.INTER_AREA)
+            h, w = img_cv.shape[:2]
 
         original_cv = img_cv.copy()
-        gray     = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
-        denoised = cv2.bilateralFilter(gray, 9, 75, 75)
-        thresh   = cv2.adaptiveThreshold(
-            denoised, 255,
-            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-            cv2.THRESH_BINARY,
-            11, 2,
-        )
-        return thresh, original_cv, (thresh.shape[1], thresh.shape[0])
+
+        # Encode back to JPEG bytes for Gemini
+        _, buf = cv2.imencode(".jpg", img_cv, [cv2.IMWRITE_JPEG_QUALITY, 90])
+        enhanced_bytes = buf.tobytes()
+
+        return enhanced_bytes, original_cv, (w, h)
     except Exception as e:
         print(f"  [OpenCV] Preprocess error: {e}")
-        return None, None, (0, 0)
+        return image_bytes, None, (0, 0)
 
-# ── STAGE 1b: QUALITY / FRAUD CHECKS ────────────────────────────
+# ── STAGE 1b: QUALITY / FRAUD CHECK ─────────────────────────────
 
 def run_fraud_checks(original_img):
-    """Rejects obviously blurry images before spending API credits."""
+    """Rejects obviously blurry images before spending Gemini API credits."""
     if original_img is None:
         return True, "Check skipped"
-    gray = cv2.cvtColor(original_img, cv2.COLOR_BGR2GRAY)
+    gray          = cv2.cvtColor(original_img, cv2.COLOR_BGR2GRAY)
     laplacian_var = cv2.Laplacian(gray, cv2.CV_64F).var()
     if laplacian_var < 40:
         return False, (
@@ -701,115 +753,30 @@ def run_fraud_checks(original_img):
         )
     return True, "Quality OK"
 
-# ── STAGE 2: EASYOCR TEXT EXTRACTION ────────────────────────────
+# ── STAGE 2: GEMINI AI EXTRACTION + VALIDATION ───────────────────
 
-def extract_text_easyocr(thresh_img):
+def verify_document_with_ai(image_bytes, document_type):
     """
-    Runs EasyOCR on the preprocessed (thresholded) image.
-    Returns a single joined string of all detected text lines.
-    """
-    reader = _get_ocr_reader()
-    if reader is None:
-        return ""
-    try:
-        results = reader.readtext(thresh_img, detail=0, paragraph=False)
-        joined  = " ".join(str(r).strip() for r in results if str(r).strip())
-        print(f"  [EasyOCR] Extracted text snippet: {joined[:120]}…")
-        return joined
-    except Exception as e:
-        print(f"  [EasyOCR] Error: {e}")
-        return ""
-
-# ── STAGE 3: REGEX LAYER ─────────────────────────────────────────
-
-# Aadhaar: exactly 12 digits, optionally space/hyphen-separated in groups of 4
-_AADHAAR_RE = re.compile(r'\b(\d{4}[\s\-]?\d{4}[\s\-]?\d{4})\b')
-
-# PAN: 5 uppercase letters + 4 digits + 1 uppercase letter
-_PAN_RE = re.compile(r'\b([A-Z]{5}[0-9]{4}[A-Z])\b')
-
-# DOB patterns:  DD/MM/YYYY  |  DD-MM-YYYY  |  DD Month YYYY
-_DOB_RE = re.compile(
-    r'\b(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{4})'
-    r'|\b(\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{4})\b',
-    re.IGNORECASE,
-)
-
-def regex_extract(ocr_text, document_type):
-    """
-    Applies Regex patterns to OCR output.
-    Returns dict: {number, dob, regex_confidence}
-    """
-    result = {"number": None, "dob": None, "regex_confidence": "none"}
-
-    if "aadhaar" in document_type.lower():
-        m = _AADHAAR_RE.search(ocr_text)
-        if m:
-            # Normalise to plain 12-digit string
-            result["number"] = re.sub(r'[\s\-]', '', m.group(1))
-            result["regex_confidence"] = "high"
-            print(f"  [Regex] Aadhaar number found: {result['number']}")
-        else:
-            print("  [Regex] Aadhaar number NOT found in OCR text.")
-
-    elif "pan" in document_type.lower():
-        m = _PAN_RE.search(ocr_text.upper())
-        if m:
-            result["number"] = m.group(1)
-            result["regex_confidence"] = "high"
-            print(f"  [Regex] PAN number found: {result['number']}")
-        else:
-            print("  [Regex] PAN number NOT found in OCR text.")
-
-    # Extract DOB (works for both doc types)
-    dob_match = _DOB_RE.search(ocr_text)
-    if dob_match:
-        raw_dob = dob_match.group(1) or dob_match.group(2)
-        result["dob"] = _normalize_dob(raw_dob)
-        print(f"  [Regex] DOB found: {result['dob']}")
-    else:
-        print("  [Regex] DOB NOT found in OCR text.")
-
-    return result
-
-# ── STAGE 4: GEMINI AI SEMANTIC CROSS-CHECK ──────────────────────
-
-def verify_document_with_ai(image_bytes, document_type, regex_hints=None):
-    """
-    Sends the original image + any Regex hints to Gemini 1.5 Flash.
-    Asks Gemini to:
-      • Confirm document authenticity
-      • Verify Name / DOB alignment
-      • Fill in any fields Regex could not extract
+    Sends the OpenCV-enhanced image to Gemini 1.5 Flash.
+    Gemini extracts Name, DOB, Document Number and validates authenticity.
     Returns (is_valid: bool, message: str, dob: str)
     """
     if not GEMINI_API_KEY:
         return False, "Gemini API key not configured on server", ""
 
-    print(f"  [Gemini AI] Semantic cross-check for {document_type}…")
+    print(f"  [Gemini AI] Analysing {document_type}…")
     try:
-        model = genai.GenerativeModel("gemini-1.5-flash")
-
-        hints_text = ""
-        if regex_hints:
-            hints_text = (
-                f"\n\nRegex pre-extraction hints (may be partial/missing):\n"
-                f"  - Document Number: {regex_hints.get('number') or 'not found'}\n"
-                f"  - Date of Birth:   {regex_hints.get('dob') or 'not found'}\n"
-                "Use these hints to cross-check but always trust what you see in the image."
-            )
-
+        model  = genai.GenerativeModel("gemini-1.5-flash")
         prompt = (
             f"You are an expert Indian Document Analyst verifying an Indian {document_type}.\n\n"
             "TASK:\n"
-            "1. Confirm the image actually shows the claimed document type.\n"
+            "1. Confirm the image shows the correct document type.\n"
             "2. Extract: Full Name, Date of Birth (DD/MM/YYYY), Document Number.\n"
-            "3. Check Name + DOB are present and internally consistent.\n\n"
+            "3. Verify Name and DOB are present and consistent.\n\n"
             "LENIENCY RULES:\n"
-            "- Background clutter, slight angle, or shadows are ACCEPTABLE.\n"
-            "- Only reject if the document type is completely wrong or totally unreadable.\n"
-            f"{hints_text}\n\n"
-            "Return ONLY raw JSON (no markdown) in this exact format:\n"
+            "- Background clutter, shadows, or slight angles are ACCEPTABLE.\n"
+            "- Only reject if the document type is completely wrong or totally unreadable.\n\n"
+            "Return ONLY raw JSON (no markdown fences) in this exact format:\n"
             '{"is_valid": bool, "name": "string", "dob": "DD/MM/YYYY", '
             '"number": "string", "reason": "string"}'
         )
@@ -818,25 +785,24 @@ def verify_document_with_ai(image_bytes, document_type, regex_hints=None):
         image_part = {"inline_data": {"mime_type": "image/jpeg", "data": b64_image}}
 
         response = model.generate_content([image_part, prompt])
-        raw_json  = response.text.strip()
+        raw_json = response.text.strip()
 
-        # Strip any accidental markdown fences
+        # Strip accidental markdown fences
         if "```json" in raw_json:
             raw_json = raw_json.split("```json")[1].split("```")[0].strip()
         elif "```" in raw_json:
             raw_json = raw_json.split("```")[1].split("```")[0].strip()
 
         print(f"  [Gemini AI] Raw response: {raw_json}")
-        ai_data = json.loads(raw_json)
+        ai_data  = json.loads(raw_json)
 
         is_valid = ai_data.get("is_valid", False)
         reason   = ai_data.get("reason", "Unknown reason")
         dob      = _normalize_dob(ai_data.get("dob", ""))
         number   = ai_data.get("number", "")
 
-        # Prefer Regex number if AI missed it but Regex found it
-        if not number and regex_hints and regex_hints.get("number"):
-            number = regex_hints["number"]
+        # ── Stage 3: Regex cross-validate Gemini output ──────────
+        number, dob = _regex_validate(number, dob, document_type)
 
         if is_valid:
             print(f"  ✅ [Gemini AI] Verified — Number: {number} | DOB: {dob}")
@@ -853,51 +819,32 @@ def verify_document_with_ai(image_bytes, document_type, regex_hints=None):
 
 def verify_document_with_gemini(image_bytes, document_type, filename="document.jpg"):
     """
-    Orchestrates the full 4-stage document verification pipeline:
-
+    3-Stage document verification pipeline:
       Stage 1 → OpenCV enhancement + quality check
-      Stage 2 → EasyOCR raw text extraction
-      Stage 3 → Regex structured identifier extraction (Aadhaar / PAN / DOB)
-      Stage 4 → Gemini AI semantic cross-check with Regex hints
-
+      Stage 2 → Gemini AI extraction + semantic validation
+      Stage 3 → Regex cross-validation of extracted number / DOB
     Returns (is_valid: bool, message: str, dob: str)
     """
     print(f"\n{'='*55}")
-    print(f"  📄 Starting verification: {document_type} [{filename}]")
+    print(f"  📄 Verifying: {document_type} [{filename}]")
     print(f"{'='*55}")
 
-    # ── Stage 1: OpenCV ─────────────────────────────────────────
-    thresh_img, original_cv, dimensions = preprocess_document_image(image_bytes)
+    # Stage 1 — OpenCV
+    enhanced_bytes, original_cv, dimensions = preprocess_document_image(image_bytes)
     if original_cv is None:
-        return False, "Could not decode the uploaded image. Please re-upload.", ""
-
-    print(f"  [Stage 1] OpenCV — image size after processing: {dimensions}")
+        print("  [Stage 1] ⚠️ OpenCV failed — using raw bytes")
+    else:
+        print(f"  [Stage 1] OpenCV ✅ — size: {dimensions}")
 
     quality_ok, quality_msg = run_fraud_checks(original_cv)
     if not quality_ok:
         return False, quality_msg, ""
-    print(f"  [Stage 1] Quality check passed ✅")
+    print(f"  [Stage 1] Quality check ✅")
 
-    # ── Stage 2: EasyOCR ────────────────────────────────────────
-    ocr_text    = extract_text_easyocr(thresh_img)
-    has_ocr     = bool(ocr_text.strip())
-    print(f"  [Stage 2] EasyOCR — text extracted: {'yes' if has_ocr else 'no (empty)'}")
+    # Stage 2 + 3 — Gemini + Regex
+    is_valid, message, dob = verify_document_with_ai(enhanced_bytes, document_type)
 
-    # ── Stage 3: Regex ──────────────────────────────────────────
-    regex_hints = regex_extract(ocr_text, document_type) if has_ocr else {}
-    print(f"  [Stage 3] Regex — hints: {regex_hints}")
-
-    # ── Stage 4: Gemini AI ───────────────────────────────────────
-    is_valid, message, dob = verify_document_with_ai(
-        image_bytes, document_type, regex_hints=regex_hints
-    )
-
-    # If Regex found a DOB but Gemini missed it, use the Regex DOB
-    if not dob and regex_hints.get("dob"):
-        dob = regex_hints["dob"]
-        print(f"  [Pipeline] Fallback to Regex DOB: {dob}")
-
-    print(f"  [Pipeline] Final result — valid={is_valid} | dob={dob} | msg={message}")
+    print(f"  [Pipeline] Final → valid={is_valid} | dob={dob} | msg={message}")
     print(f"{'='*55}\n")
     return is_valid, message, dob
 
@@ -1139,10 +1086,5 @@ def home():
 # RUN
 # ==================================================
 if __name__ == '__main__':
-    # Pre-warm EasyOCR at startup so the first verification request doesn't timeout
-    print("Pre-warming EasyOCR model on startup...")
-    _get_ocr_reader()
-    print("EasyOCR pre-warm complete ✅")
-    # Cloud providers like Render supply a PORT env variable
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
