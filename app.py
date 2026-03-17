@@ -1130,6 +1130,21 @@ def home():
     return "Smart FIR Backend Running 🚔"
 
 # ==================================================
+# 🧹 CLEAR STALE VERIFICATION JOB (call once if stuck)
+# Usage: GET /clear_job/<email>
+# ==================================================
+@app.route('/clear_job/<job_id>', methods=['GET'])
+@cross_origin()
+def clear_job(job_id):
+    try:
+        result = db["verification_jobs"].delete_one({"job_id": job_id})
+        if result.deleted_count > 0:
+            return jsonify({"status": "success", "message": f"Job cleared for {job_id}"})
+        return jsonify({"status": "success", "message": "No job found to clear"})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+# ==================================================
 # RUN
 # ==================================================
 if __name__ == '__main__':
