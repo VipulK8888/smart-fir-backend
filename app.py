@@ -11,9 +11,7 @@ import io
 import base64
 
 # Image processing for document verification pipeline
-from PIL import Image, ImageEnhance, ImageFilter, ImageOps
-import cv2
-import numpy as np
+from PIL import Image, ImageEnhance, ImageFilter
 
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
@@ -24,8 +22,6 @@ from deep_translator import GoogleTranslator
 import spacy
 import subprocess
 import google.generativeai as genai
-import json
-import dateutil.parser as dparser
 
 # Setup Gemini API key
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
@@ -268,6 +264,9 @@ def generate_pdf(fir_data, fir_id):
     # Row 8: Incident Description
     desc_para = Paragraph("<b>Incident Description:</b><br/>" + fir_data.get('description', 'No description provided.'), normal_style)
     table_data.append([desc_para, ""])
+
+    # Removed redundant Complainant Information rows here
+
 
     # Construct Table
     t = Table(table_data, colWidths=[260, 260])
@@ -579,325 +578,328 @@ def get_fir(fir_id):
         return jsonify({"status": "error", "message": str(e)}), 500
 
 # ==================================================
-# 🛠️ DOCUMENT VERIFICATION — COMPLETELY FIXED VERSION
+# 🛠️ DOCUMENT VERIFICATION — OpenCV + EasyOCR + Regex + Gemini AI
+# Multi-Stage Pipeline:
+#   Stage 1 → OpenCV Image Enhancement
+#   Stage 2 → EasyOCR Text Extraction
+#   Stage 3 → Regex Layer (Aadhaar / PAN structured identifiers)
+#   Stage 4 → Gemini AI Semantic Cross-Check (Name / DOB / Authenticity)
 # ==================================================
+import cv2
+import numpy as np
+import json
+from PIL import Image, ImageEnhance
 
-def month_name_to_date(match):
-    """Helper to convert month names to numbers"""
-    month_map = {
-        "JAN": 1, "JANUARY": 1,
-        "FEB": 2, "FEBRUARY": 2,
-        "MAR": 3, "MARCH": 3,
-        "APR": 4, "APRIL": 4,
-        "MAY": 5,
-        "JUN": 6, "JUNE": 6,
-        "JUL": 7, "JULY": 7,
-        "AUG": 8, "AUGUST": 8,
-        "SEP": 9, "SEPTEMBER": 9,
-        "OCT": 10, "OCTOBER": 10,
-        "NOV": 11, "NOVEMBER": 11,
-        "DEC": 12, "DECEMBER": 12
-    }
-    day = int(match.group(1))
-    month_str = match.group(2)[:3]  # Take first 3 letters
-    year = match.group(3)
-    
-    month_num = month_map.get(month_str, 0)
-    if month_num == 0:
-        raise ValueError(f"Unknown month: {month_str}")
-    
-    return f"{day:02d}/{month_num:02d}/{year}"
+# Lazy-load EasyOCR reader to avoid heavy startup cost
+_easyocr_reader = None
 
+def _get_ocr_reader():
+    """Returns a singleton EasyOCR reader (English + Hindi support)."""
+    global _easyocr_reader
+    if _easyocr_reader is None:
+        try:
+            import easyocr
+            print("  [OCR] Initialising EasyOCR reader (en + hi)…")
+            _easyocr_reader = easyocr.Reader(["en", "hi"], gpu=False)
+            print("  [OCR] EasyOCR ready.")
+        except ImportError:
+            print("  [OCR] ⚠️  EasyOCR not installed — OCR stage will be skipped.")
+    return _easyocr_reader
+
+# ── HELPERS ─────────────────────────────────────────────────────
 
 def _normalize_dob(dob_str):
-    """
-    ROBUST DOB normalization - handles ALL common formats
-    Returns: DD/MM/YYYY or empty string
-    """
-    if not dob_str or str(dob_str).strip().upper() in ["N/A", "NA", "UNKNOWN", "", "NOT FOUND"]:
+    """Normalises any date string (including month names) to DD/MM/YYYY."""
+    if not dob_str:
         return ""
-    
-    # Clean input
-    dob_str = str(dob_str).strip().upper()
-    dob_str = re.sub(r'(ST|ND|RD|TH)', '', dob_str)  # Remove ordinal suffixes
-    dob_str = dob_str.replace(".", "/")
-    
-    # Try intelligent parsing first (handles most formats)
+    import dateutil.parser as dparser
     try:
-        parsed = dparser.parse(dob_str, dayfirst=True, fuzzy=True)
-        return parsed.strftime("%d/%m/%Y")
-    except:
-        pass
-    
-    # Fallback: Manual regex patterns
-    patterns = [
-        # DD/MM/YYYY or DD-MM-YYYY
-        (r'(\d{1,2})[/-](\d{1,2})[/-](\d{4})', 
-         lambda m: f"{int(m.group(1)):02d}/{int(m.group(2)):02d}/{m.group(3)}"),
-        
-        # YYYY/MM/DD or YYYY-MM-DD
-        (r'(\d{4})[/-](\d{1,2})[/-](\d{1,2})', 
-         lambda m: f"{int(m.group(3)):02d}/{int(m.group(2)):02d}/{m.group(1)}"),
-        
-        # DD MONTH YYYY (e.g., 15 MAY 1995)
-        (r'(\d{1,2})\s+([A-Z]{3,})\s+(\d{4})', 
-         lambda m: month_name_to_date(m)),
-    ]
-    
-    for pattern, formatter in patterns:
-        match = re.search(pattern, dob_str)
+        parsed_date = dparser.parse(dob_str, dayfirst=True)
+        return parsed_date.strftime("%d/%m/%Y")
+    except Exception:
+        dob_str = dob_str.strip().replace("-", "/").replace(".", "/")
+        match = re.search(r'(\d{1,2})/(\d{1,2})/(\d{4})', dob_str)
         if match:
-            try:
-                return formatter(match)
-            except:
-                continue
-    
-    # If all parsing fails, return as-is (better than crashing)
-    print(f"⚠️ Could not normalize DOB: '{dob_str}'")
-    return dob_str
+            return f"{match.group(1).zfill(2)}/{match.group(2).zfill(2)}/{match.group(3)}"
+        return dob_str
 
+# ── STAGE 1: OPENCV IMAGE ENHANCEMENT ───────────────────────────
 
 def preprocess_document_image(image_bytes):
     """
-    Improved preprocessing pipeline with proper EXIF handling
-    Returns: processed_image, original_color, (width, height)
+    OpenCV preprocessing pipeline:
+    - EXIF auto-rotation
+    - Upscaling for low-res images
+    - Grayscale → Bilateral denoising → Adaptive thresholding
+    Returns (thresh_img, original_cv, (width, height))
     """
     try:
-        # Load with PIL first for EXIF handling
-        pil_img = Image.open(io.BytesIO(image_bytes))
-        
-        # Auto-rotate based on EXIF (handles phone photos correctly)
-        pil_img = ImageOps.exif_transpose(pil_img)
-        
-        # Convert to OpenCV format
-        img_cv = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
-        
+        np_arr = np.frombuffer(image_bytes, np.uint8)
+        img_cv = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
         if img_cv is None:
             return None, None, (0, 0)
 
-        # Upscale if too small (improves OCR)
+        # Auto-rotate using EXIF orientation tag
+        try:
+            from PIL import ExifTags
+            pil_img = Image.open(io.BytesIO(image_bytes))
+            orient_key = next(
+                (k for k, v in ExifTags.TAGS.items() if v == "Orientation"), None
+            )
+            exif = pil_img._getexif() if hasattr(pil_img, "_getexif") else None
+            if exif and orient_key and orient_key in exif:
+                rot_map = {
+                    3: cv2.ROTATE_180,
+                    6: cv2.ROTATE_90_CLOCKWISE,
+                    8: cv2.ROTATE_90_COUNTERCLOCKWISE,
+                }
+                if exif[orient_key] in rot_map:
+                    img_cv = cv2.rotate(img_cv, rot_map[exif[orient_key]])
+        except Exception:
+            pass
+
+        # Upscale if the longest dimension is under 1400 px
         h, w = img_cv.shape[:2]
-        if max(h, w) < 1200:
-            scale = 1200 / max(h, w)
-            img_cv = cv2.resize(img_cv, (int(w * scale), int(h * scale)), 
-                               interpolation=cv2.INTER_CUBIC)
+        if max(h, w) < 1400:
+            scale = 1400 / max(h, w)
+            img_cv = cv2.resize(
+                img_cv,
+                (int(w * scale), int(h * scale)),
+                interpolation=cv2.INTER_CUBIC,
+            )
 
         original_cv = img_cv.copy()
-        
-        # Preprocessing for quality check (not sent to AI)
-        gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
-        
-        return gray, original_cv, (img_cv.shape[1], img_cv.shape[0])
-        
+        gray     = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
+        denoised = cv2.bilateralFilter(gray, 9, 75, 75)
+        thresh   = cv2.adaptiveThreshold(
+            denoised, 255,
+            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY,
+            11, 2,
+        )
+        return thresh, original_cv, (thresh.shape[1], thresh.shape[0])
     except Exception as e:
-        print(f"❌ Preprocess error: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"  [OpenCV] Preprocess error: {e}")
         return None, None, (0, 0)
 
+# ── STAGE 1b: QUALITY / FRAUD CHECKS ────────────────────────────
 
 def run_fraud_checks(original_img):
-    """
-    VERY LENIENT quality checks - reject only obviously bad images
-    """
+    """Rejects obviously blurry images before spending API credits."""
     if original_img is None:
-        return True, "Skipped quality check"
-    
+        return True, "Check skipped"
+    gray = cv2.cvtColor(original_img, cv2.COLOR_BGR2GRAY)
+    laplacian_var = cv2.Laplacian(gray, cv2.CV_64F).var()
+    if laplacian_var < 40:
+        return False, (
+            f"Image too blurry (sharpness score: {laplacian_var:.0f}). "
+            "Please retake with better lighting."
+        )
+    return True, "Quality OK"
+
+# ── STAGE 2: EASYOCR TEXT EXTRACTION ────────────────────────────
+
+def extract_text_easyocr(thresh_img):
+    """
+    Runs EasyOCR on the preprocessed (thresholded) image.
+    Returns a single joined string of all detected text lines.
+    """
+    reader = _get_ocr_reader()
+    if reader is None:
+        return ""
     try:
-        gray = cv2.cvtColor(original_img, cv2.COLOR_BGR2GRAY)
-        laplacian_var = cv2.Laplacian(gray, cv2.CV_64F).var()
-        
-        # VERY LENIENT threshold (15 instead of 40)
-        # Even blurry phone photos usually score 20-40
-        if laplacian_var < 15:
-            return False, f"Image is extremely blurry (clarity score: {laplacian_var:.0f}). Please retake with better focus."
-        
-        print(f"  ✅ Quality check passed (blur score: {laplacian_var:.0f})")
-        return True, "Quality OK"
-        
+        results = reader.readtext(thresh_img, detail=0, paragraph=False)
+        joined  = " ".join(str(r).strip() for r in results if str(r).strip())
+        print(f"  [EasyOCR] Extracted text snippet: {joined[:120]}…")
+        return joined
     except Exception as e:
-        print(f"  ⚠️ Quality check error: {e}")
-        return True, "Quality check skipped"  # Don't block on errors
+        print(f"  [EasyOCR] Error: {e}")
+        return ""
 
+# ── STAGE 3: REGEX LAYER ─────────────────────────────────────────
 
-def extract_json_from_text(text):
+# Aadhaar: exactly 12 digits, optionally space/hyphen-separated in groups of 4
+_AADHAAR_RE = re.compile(r'\b(\d{4}[\s\-]?\d{4}[\s\-]?\d{4})\b')
+
+# PAN: 5 uppercase letters + 4 digits + 1 uppercase letter
+_PAN_RE = re.compile(r'\b([A-Z]{5}[0-9]{4}[A-Z])\b')
+
+# DOB patterns:  DD/MM/YYYY  |  DD-MM-YYYY  |  DD Month YYYY
+_DOB_RE = re.compile(
+    r'\b(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{4})'
+    r'|\b(\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{4})\b',
+    re.IGNORECASE,
+)
+
+def regex_extract(ocr_text, document_type):
     """
-    ROBUST JSON extractor - handles markdown, extra text, nested braces, etc.
+    Applies Regex patterns to OCR output.
+    Returns dict: {number, dob, regex_confidence}
     """
-    # Remove markdown code blocks
-    text = re.sub(r'```json\s*', '', text, flags=re.IGNORECASE)
-    text = re.sub(r'```\s*', '', text)
-    
-    # Find JSON object using regex (most reliable method)
-    # This matches { ... } including nested braces
-    json_pattern = r'\{(?:[^{}]|(?:\{(?:[^{}]|(?:\{[^{}]*\}))*\}))*\}'
-    match = re.search(json_pattern, text)
-    
-    if match:
-        return match.group(0).strip()
-    
-    # Fallback: try to find anything between first { and last }
-    if '{' in text and '}' in text:
-        start = text.index('{')
-        end = text.rindex('}') + 1
-        return text[start:end].strip()
-    
-    return None
+    result = {"number": None, "dob": None, "regex_confidence": "none"}
 
+    if "aadhaar" in document_type.lower():
+        m = _AADHAAR_RE.search(ocr_text)
+        if m:
+            # Normalise to plain 12-digit string
+            result["number"] = re.sub(r'[\s\-]', '', m.group(1))
+            result["regex_confidence"] = "high"
+            print(f"  [Regex] Aadhaar number found: {result['number']}")
+        else:
+            print("  [Regex] Aadhaar number NOT found in OCR text.")
 
-def verify_document_with_ai(image_bytes, document_type):
+    elif "pan" in document_type.lower():
+        m = _PAN_RE.search(ocr_text.upper())
+        if m:
+            result["number"] = m.group(1)
+            result["regex_confidence"] = "high"
+            print(f"  [Regex] PAN number found: {result['number']}")
+        else:
+            print("  [Regex] PAN number NOT found in OCR text.")
+
+    # Extract DOB (works for both doc types)
+    dob_match = _DOB_RE.search(ocr_text)
+    if dob_match:
+        raw_dob = dob_match.group(1) or dob_match.group(2)
+        result["dob"] = _normalize_dob(raw_dob)
+        print(f"  [Regex] DOB found: {result['dob']}")
+    else:
+        print("  [Regex] DOB NOT found in OCR text.")
+
+    return result
+
+# ── STAGE 4: GEMINI AI SEMANTIC CROSS-CHECK ──────────────────────
+
+def verify_document_with_ai(image_bytes, document_type, regex_hints=None):
     """
-    IMPROVED AI verification with better prompt and robust JSON parsing
+    Sends the original image + any Regex hints to Gemini 1.5 Flash.
+    Asks Gemini to:
+      • Confirm document authenticity
+      • Verify Name / DOB alignment
+      • Fill in any fields Regex could not extract
+    Returns (is_valid: bool, message: str, dob: str)
     """
     if not GEMINI_API_KEY:
-        return False, "Gemini API key not configured in environment variables", ""
+        return False, "Gemini API key not configured on server", ""
 
-    print(f"  [AI Analyst] Analyzing {document_type}...")
-    
+    print(f"  [Gemini AI] Semantic cross-check for {document_type}…")
     try:
         model = genai.GenerativeModel("gemini-1.5-flash")
-        
-        # IMPROVED PROMPT - More explicit and lenient instructions
-        prompt = f"""You are analyzing an image of an Indian {document_type}.
 
-CRITICAL INSTRUCTIONS:
-1. Photos may have backgrounds, shadows, or slight blur - this is NORMAL for phone photos. ACCEPT them.
-2. Find the card/document within the image frame (ignore surrounding objects like desk, table, hands)
-3. Extract these fields EXACTLY as they appear on the document:
-   - Full Name (complete name as printed)
-   - Date of Birth (convert ANY format to DD/MM/YYYY)
-   - Document Number (Aadhaar: 12 digits with or without spaces, PAN: 10 alphanumeric)
+        hints_text = ""
+        if regex_hints:
+            hints_text = (
+                f"\n\nRegex pre-extraction hints (may be partial/missing):\n"
+                f"  - Document Number: {regex_hints.get('number') or 'not found'}\n"
+                f"  - Date of Birth:   {regex_hints.get('dob') or 'not found'}\n"
+                "Use these hints to cross-check but always trust what you see in the image."
+            )
 
-VALIDATION RULES - BE LENIENT:
-✅ ACCEPT if:
-   - Text is readable (even if photo is slightly blurry or angled)
-   - It's clearly an {document_type} (correct document type visible)
-   - Document appears genuine (not a photocopy of a photocopy)
-   - Background clutter is present (desk, table, hands holding card)
+        prompt = (
+            f"You are an expert Indian Document Analyst verifying an Indian {document_type}.\n\n"
+            "TASK:\n"
+            "1. Confirm the image actually shows the claimed document type.\n"
+            "2. Extract: Full Name, Date of Birth (DD/MM/YYYY), Document Number.\n"
+            "3. Check Name + DOB are present and internally consistent.\n\n"
+            "LENIENCY RULES:\n"
+            "- Background clutter, slight angle, or shadows are ACCEPTABLE.\n"
+            "- Only reject if the document type is completely wrong or totally unreadable.\n"
+            f"{hints_text}\n\n"
+            "Return ONLY raw JSON (no markdown) in this exact format:\n"
+            '{"is_valid": bool, "name": "string", "dob": "DD/MM/YYYY", '
+            '"number": "string", "reason": "string"}'
+        )
 
-❌ REJECT only if:
-   - Text is completely unreadable/illegible
-   - Wrong document type (e.g., passport when you need Aadhaar)
-   - Obviously fake/heavily edited/photoshopped
-   - Image is completely blank or corrupted
-
-DATE FORMAT EXAMPLES:
-- "15/05/1995" → "15/05/1995"
-- "15-May-1995" → "15/05/1995"
-- "1995-05-15" → "15/05/1995"
-- "15 MAY 1995" → "15/05/1995"
-
-OUTPUT FORMAT (CRITICAL - RESPOND WITH ONLY THIS JSON):
-If valid:
-{{"is_valid": true, "name": "RAJESH KUMAR SHARMA", "dob": "15/05/1995", "number": "1234 5678 9012", "reason": ""}}
-
-If invalid:
-{{"is_valid": false, "name": "", "dob": "", "number": "", "reason": "specific reason why it failed"}}
-
-IMPORTANT: Return ONLY the JSON object above. No explanations, no markdown, no extra text.
-
-Analyze the image now:"""
-        
-        # Encode image
-        b64_image = base64.b64encode(image_bytes).decode("utf-8")
+        b64_image  = base64.b64encode(image_bytes).decode("utf-8")
         image_part = {"inline_data": {"mime_type": "image/jpeg", "data": b64_image}}
-        
-        # Call Gemini API
+
         response = model.generate_content([image_part, prompt])
-        raw_response = response.text.strip()
-        
-        print(f"  [AI Raw Response (first 300 chars)]: {raw_response[:300]}")
-        
-        # ROBUST JSON extraction
-        cleaned_json = extract_json_from_text(raw_response)
-        
-        if not cleaned_json:
-            print(f"  ❌ No valid JSON found in AI response")
-            print(f"     Full response: {raw_response}")
-            return False, "AI returned invalid format - please try again with a clearer photo", ""
-        
-        print(f"  [Cleaned JSON]: {cleaned_json}")
-        
-        # Parse JSON
-        try:
-            data = json.loads(cleaned_json)
-        except json.JSONDecodeError as je:
-            print(f"  ❌ JSON Parse Error: {je}")
-            print(f"     Attempted to parse: {cleaned_json}")
-            return False, "AI response format error - please retry", ""
-        
-        # Extract fields
-        is_valid = data.get("is_valid", False)
-        reason = data.get("reason", "Unknown error")
-        name = data.get("name", "")
-        raw_dob = data.get("dob", "")
-        number = data.get("number", "")
-        
-        # Normalize DOB
-        normalized_dob = _normalize_dob(raw_dob)
-        
+        raw_json  = response.text.strip()
+
+        # Strip any accidental markdown fences
+        if "```json" in raw_json:
+            raw_json = raw_json.split("```json")[1].split("```")[0].strip()
+        elif "```" in raw_json:
+            raw_json = raw_json.split("```")[1].split("```")[0].strip()
+
+        print(f"  [Gemini AI] Raw response: {raw_json}")
+        ai_data = json.loads(raw_json)
+
+        is_valid = ai_data.get("is_valid", False)
+        reason   = ai_data.get("reason", "Unknown reason")
+        dob      = _normalize_dob(ai_data.get("dob", ""))
+        number   = ai_data.get("number", "")
+
+        # Prefer Regex number if AI missed it but Regex found it
+        if not number and regex_hints and regex_hints.get("number"):
+            number = regex_hints["number"]
+
         if is_valid:
-            print(f"  ✅ Verification PASSED")
-            print(f"     Name: {name}")
-            print(f"     DOB: {normalized_dob} (raw: {raw_dob})")
-            print(f"     Number: {number}")
-            return True, f"Verified: {number}", normalized_dob
+            print(f"  ✅ [Gemini AI] Verified — Number: {number} | DOB: {dob}")
+            return True, f"Verified: {number}", dob
         else:
-            print(f"  ❌ Verification FAILED: {reason}")
-            return False, f"Rejected: {reason}", ""
+            print(f"  ❌ [Gemini AI] Rejected — {reason}")
+            return False, f"Invalid: {reason}", ""
 
     except Exception as e:
-        print(f"  ⚠️ Unexpected error in AI verification: {e}")
-        import traceback
-        traceback.print_exc()
-        return False, f"Verification error: {str(e)}", ""
+        print(f"  ⚠️ [Gemini AI] Error: {e}")
+        return False, f"AI Analysis Error: {str(e)}", ""
 
+# ── MAIN ENTRY POINT ─────────────────────────────────────────────
 
 def verify_document_with_gemini(image_bytes, document_type, filename="document.jpg"):
     """
-    MAIN ENTRY POINT - Orchestrates the complete verification pipeline
+    Orchestrates the full 4-stage document verification pipeline:
+
+      Stage 1 → OpenCV enhancement + quality check
+      Stage 2 → EasyOCR raw text extraction
+      Stage 3 → Regex structured identifier extraction (Aadhaar / PAN / DOB)
+      Stage 4 → Gemini AI semantic cross-check with Regex hints
+
+    Returns (is_valid: bool, message: str, dob: str)
     """
-    print(f"\n{'='*70}")
-    print(f"🔍 DOCUMENT VERIFICATION STARTED")
-    print(f"   Type: {document_type}")
-    print(f"   Image size: {len(image_bytes)} bytes")
-    print(f"{'='*70}")
-    
-    # Stage 1: Preprocess image
-    print(f"\n📐 Stage 1: Image Preprocessing...")
-    _, original_cv, (width, height) = preprocess_document_image(image_bytes)
-    
+    print(f"\n{'='*55}")
+    print(f"  📄 Starting verification: {document_type} [{filename}]")
+    print(f"{'='*55}")
+
+    # ── Stage 1: OpenCV ─────────────────────────────────────────
+    thresh_img, original_cv, dimensions = preprocess_document_image(image_bytes)
     if original_cv is None:
-        print(f"❌ FAILED: Could not decode image")
-        return False, "Could not decode image - file may be corrupted or in unsupported format", ""
-    
-    print(f"   ✅ Image decoded successfully ({width}x{height})")
-    
-    # Stage 2: Quality check (very lenient)
-    print(f"\n🔬 Stage 2: Quality Check...")
+        return False, "Could not decode the uploaded image. Please re-upload.", ""
+
+    print(f"  [Stage 1] OpenCV — image size after processing: {dimensions}")
+
     quality_ok, quality_msg = run_fraud_checks(original_cv)
     if not quality_ok:
-        print(f"❌ FAILED: {quality_msg}")
         return False, quality_msg, ""
-    
-    # Stage 3: AI verification
-    print(f"\n🤖 Stage 3: AI Verification...")
-    is_valid, message, dob = verify_document_with_ai(image_bytes, document_type)
-    
-    print(f"\n{'='*70}")
-    if is_valid:
-        print(f"✅ VERIFICATION SUCCESSFUL")
-        print(f"   DOB extracted: {dob}")
-    else:
-        print(f"❌ VERIFICATION FAILED")
-        print(f"   Reason: {message}")
-    print(f"{'='*70}\n")
-    
+    print(f"  [Stage 1] Quality check passed ✅")
+
+    # ── Stage 2: EasyOCR ────────────────────────────────────────
+    ocr_text    = extract_text_easyocr(thresh_img)
+    has_ocr     = bool(ocr_text.strip())
+    print(f"  [Stage 2] EasyOCR — text extracted: {'yes' if has_ocr else 'no (empty)'}")
+
+    # ── Stage 3: Regex ──────────────────────────────────────────
+    regex_hints = regex_extract(ocr_text, document_type) if has_ocr else {}
+    print(f"  [Stage 3] Regex — hints: {regex_hints}")
+
+    # ── Stage 4: Gemini AI ───────────────────────────────────────
+    is_valid, message, dob = verify_document_with_ai(
+        image_bytes, document_type, regex_hints=regex_hints
+    )
+
+    # If Regex found a DOB but Gemini missed it, use the Regex DOB
+    if not dob and regex_hints.get("dob"):
+        dob = regex_hints["dob"]
+        print(f"  [Pipeline] Fallback to Regex DOB: {dob}")
+
+    print(f"  [Pipeline] Final result — valid={is_valid} | dob={dob} | msg={message}")
+    print(f"{'='*55}\n")
     return is_valid, message, dob
 
 
 # ==================================================
-# 👤 SAVE / UPDATE USER PROFILE (COMPLETELY FIXED)
+# 👤 SAVE / UPDATE USER PROFILE
 # ==================================================
 @app.route('/save_profile', methods=['POST'])
 @cross_origin()
@@ -907,11 +909,6 @@ def save_profile():
         if not email:
             return jsonify({"status": "error", "message": "Email is required"}), 400
 
-        print(f"\n{'='*70}")
-        print(f"📝 SAVE PROFILE REQUEST")
-        print(f"   Email: {email}")
-        print(f"{'='*70}")
-        
         name = request.form.get("name", "")
         dob = request.form.get("dob", "")
         phone = request.form.get("phone", "")
@@ -926,105 +923,62 @@ def save_profile():
         }
 
         # --- Process Aadhaar Image ---
+        aadhaar_dob = existing_profile.get("aadhaar_dob", "")
         if "aadhaar_image" in request.files:
-            print("\n📄 Processing Aadhaar Card...")
             aadhaar_file = request.files["aadhaar_image"]
             aadhaar_bytes = aadhaar_file.read()
             
-            print(f"   File: {aadhaar_file.filename}")
-            print(f"   Size: {len(aadhaar_bytes)} bytes")
-            
-            # Delete old file if exists
+            # Clean old file
             if existing_profile.get("aadhaar_id"):
-                try: 
-                    fs.delete(ObjectId(existing_profile["aadhaar_id"]))
-                    print("   🗑️ Deleted old Aadhaar image from GridFS")
-                except Exception as del_err: 
-                    print(f"   ⚠️ Could not delete old Aadhaar: {del_err}")
-            
-            # Save new file to GridFS
+                try: fs.delete(ObjectId(existing_profile["aadhaar_id"]))
+                except: pass
+                
             aadhaar_id = fs.put(aadhaar_bytes, filename="aadhaar.jpg", content_type="image/jpeg")
-            print(f"   💾 Saved to GridFS with ID: {aadhaar_id}")
-            
-            # Verify with AI
-            aadhaar_verified, verify_msg, aadhaar_dob = verify_document_with_gemini(
-                aadhaar_bytes, "Aadhaar Card"
-            )
+            aadhaar_verified, _, aadhaar_dob = verify_document_with_gemini(aadhaar_bytes, "Aadhaar Card")
             
             update_doc["aadhaar_id"] = str(aadhaar_id)
             update_doc["aadhaar_verified"] = aadhaar_verified
             update_doc["aadhaar_dob"] = aadhaar_dob
-            update_doc["aadhaar_message"] = verify_msg
 
         # --- Process PAN Image ---
+        pan_dob = existing_profile.get("pan_dob", "")
         if "pan_image" in request.files:
-            print("\n📄 Processing PAN Card...")
             pan_file = request.files["pan_image"]
             pan_bytes = pan_file.read()
             
-            print(f"   File: {pan_file.filename}")
-            print(f"   Size: {len(pan_bytes)} bytes")
-            
-            # Delete old file if exists
+            # Clean old file
             if existing_profile.get("pan_id"):
-                try: 
-                    fs.delete(ObjectId(existing_profile["pan_id"]))
-                    print("   🗑️ Deleted old PAN image from GridFS")
-                except Exception as del_err: 
-                    print(f"   ⚠️ Could not delete old PAN: {del_err}")
-            
-            # Save new file to GridFS
+                try: fs.delete(ObjectId(existing_profile["pan_id"]))
+                except: pass
+                
             pan_id = fs.put(pan_bytes, filename="pan.jpg", content_type="image/jpeg")
-            print(f"   💾 Saved to GridFS with ID: {pan_id}")
-            
-            # Verify with AI
-            pan_verified, verify_msg, pan_dob = verify_document_with_gemini(
-                pan_bytes, "PAN Card"
-            )
+            pan_verified, _, pan_dob = verify_document_with_gemini(pan_bytes, "PAN Card")
             
             update_doc["pan_id"] = str(pan_id)
             update_doc["pan_verified"] = pan_verified
             update_doc["pan_dob"] = pan_dob
-            update_doc["pan_message"] = verify_msg
 
-        # --- Cross-Document DOB Matching ---
-        final_aadhaar_dob = update_doc.get("aadhaar_dob") or existing_profile.get("aadhaar_dob", "")
-        final_pan_dob = update_doc.get("pan_dob") or existing_profile.get("pan_dob", "")
+        # ---- Cross-Document DOB Matching ----
+        # If we have both DOBs (either from this request or pre-existing)
+        final_aadhaar_dob = update_doc.get("aadhaar_dob", existing_profile.get("aadhaar_dob", ""))
+        final_pan_dob     = update_doc.get("pan_dob",     existing_profile.get("pan_dob", ""))
         
         if final_aadhaar_dob and final_pan_dob:
-            print(f"\n🔍 Cross-Validation: Checking DOB consistency")
-            print(f"   Aadhaar DOB: {final_aadhaar_dob}")
-            print(f"   PAN DOB:     {final_pan_dob}")
-            
             if final_aadhaar_dob != final_pan_dob:
-                print("   ❌ DOB MISMATCH DETECTED!")
+                print(f"❌ DOB Mismatch! '{final_aadhaar_dob}' vs '{final_pan_dob}'")
                 update_doc["aadhaar_verified"] = False
                 update_doc["pan_verified"] = False
-                update_doc["verification_failure_reason"] = (
-                    f"DOB Mismatch: Aadhaar shows {final_aadhaar_dob} "
-                    f"but PAN shows {final_pan_dob}. Please verify your documents."
-                )
+                update_doc["verification_failure_reason"] = f"DOB mismatch: Aadhaar ({final_aadhaar_dob}) != PAN ({final_pan_dob})."
             else:
-                print("   ✅ DOB Match: Documents are consistent")
+                print(f"✅ DOB Match: {final_aadhaar_dob}")
                 update_doc["verification_failure_reason"] = None
 
-        # Save to database
-        print(f"\n💾 Updating database...")
         users_col.update_one({"email": email}, {"$set": update_doc}, upsert=True)
-        
-        # Return updated profile
         profile = users_col.find_one({"email": email}, {"_id": 0, "password": 0})
-        
-        print(f"✅ Profile saved successfully")
-        print(f"{'='*70}\n")
-        
         return jsonify({"status": "success", "profile": profile})
 
     except Exception as e:
-        print(f"\n❌ SAVE PROFILE ERROR: {e}")
-        import traceback
-        traceback.print_exc()
-        print(f"{'='*70}\n")
+        print(f"save_profile error: {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
@@ -1089,7 +1043,6 @@ def serve_pdf(filename):
             
     except Exception as e:
         return jsonify({"status": "error", "message": f"Server Error: {str(e)}"}), 500
-
 # ==================================================
 # 🤖 CHATBOT API (GEMINI GUIDED FIR)
 # ==================================================
@@ -1160,20 +1113,12 @@ def chat():
 # ==================================================
 @app.route('/')
 def home():
-    return "Smart FIR Backend Running 🚔 - Document Verification System Active"
+    return "Smart FIR Backend Running 🚔"
 
 # ==================================================
-# RUN APPLICATION
+# RUN
 # ==================================================
 if __name__ == '__main__':
     # Cloud providers like Render supply a PORT env variable
     port = int(os.environ.get("PORT", 5000))
-    print("\n" + "="*70)
-    print("🚀 SMART FIR BACKEND - STARTING")
-    print("="*70)
-    print(f"📡 Server will run on: http://0.0.0.0:{port}")
-    print(f"🔐 MongoDB: {'Connected' if client else 'Not connected'}")
-    print(f"🤖 Gemini API: {'Configured' if GEMINI_API_KEY else 'NOT CONFIGURED'}")
-    print("="*70 + "\n")
-    
-    app.run(host="0.0.0.0", port=port, debug=False)
+    app.run(host="0.0.0.0", port=port)
