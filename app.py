@@ -896,6 +896,7 @@ def save_profile():
 
         def run_verification():
             try:
+                print(f"🔄 [Thread] Starting verification for {email}")
                 existing_profile = users_col.find_one({"email": email}) or {}
                 update_doc = {
                     "name":  name  or existing_profile.get("name", ""),
@@ -1130,6 +1131,18 @@ def home():
     return "Smart FIR Backend Running 🚔"
 
 # ==================================================
+# 🔍 VERSION CHECK — confirms which code is deployed
+# ==================================================
+@app.route('/version')
+def version():
+    return jsonify({
+        "version": "3.0",
+        "gemini_model": "gemini-2.0-flash",
+        "job_store": "mongodb",
+        "status": "ok"
+    })
+
+# ==================================================
 # 🧹 CLEAR STALE VERIFICATION JOB (call once if stuck)
 # Usage: GET /clear_job/<email>
 # ==================================================
@@ -1141,6 +1154,38 @@ def clear_job(job_id):
         if result.deleted_count > 0:
             return jsonify({"status": "success", "message": f"Job cleared for {job_id}"})
         return jsonify({"status": "success", "message": "No job found to clear"})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+# ==================================================
+# 🧹 CLEAR STALE PROFILE VERIFICATION DATA
+# Usage: GET /clear_profile_verification/<email>
+# Resets aadhaar/pan verification fields in user profile
+# ==================================================
+@app.route('/clear_profile_verification/<email>', methods=['GET'])
+@cross_origin()
+def clear_profile_verification(email):
+    try:
+        result = users_col.update_one(
+            {"email": email},
+            {"$unset": {
+                "aadhaar_verified": "",
+                "aadhaar_dob": "",
+                "aadhaar_message": "",
+                "aadhaar_id": "",
+                "pan_verified": "",
+                "pan_dob": "",
+                "pan_message": "",
+                "pan_id": "",
+                "verification_failure_reason": ""
+            }}
+        )
+        # Also clear the job
+        db["verification_jobs"].delete_one({"job_id": email})
+        return jsonify({
+            "status": "success",
+            "message": f"Profile verification data cleared for {email}"
+        })
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
