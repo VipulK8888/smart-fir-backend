@@ -12,3 +12,5 @@ python-dateutil==2.8.2
 python-dotenv==1.0.1
 https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.7.1/en_core_web_sm-3.7.1.tar.gz
 gunicorn
+
+
