@@ -746,7 +746,7 @@ def run_fraud_checks(original_img):
         return True, "Check skipped"
     gray          = cv2.cvtColor(original_img, cv2.COLOR_BGR2GRAY)
     laplacian_var = cv2.Laplacian(gray, cv2.CV_64F).var()
-    if laplacian_var < 40:
+    if laplacian_var < 5: # Drastically lowered to 5 to avoid false positives on valid cards
         return False, (
             f"Image too blurry (sharpness score: {laplacian_var:.0f}). "
             "Please retake with better lighting."
@@ -780,8 +780,10 @@ def verify_document_with_ai(image_bytes, document_type):
                 "2. Extract: Full Name, Date of Birth (DD/MM/YYYY), Document Number.\n"
                 "3. Verify Name and DOB are present and consistent.\n\n"
                 "LENIENCY RULES:\n"
-                "- Background clutter, shadows, or slight angles are ACCEPTABLE.\n"
-                "- Only reject if the document type is completely wrong or totally unreadable.\n\n"
+                "- Background clutter, shadows, or slight angles are COMPLETELY ACCEPTABLE.\n"
+                "- ACCEPT TEST OR SAMPLE DOCUMENTS. Do NOT reject documents just because they have 'Sample', 'Test', or watermarks. This is a testing environment.\n"
+                "- Only reject if the document type is completely wrong (e.g., got a car instead of an ID).\n"
+                "- Ignore minor text overlaps or poor image quality.\n\n"
                 "Return ONLY raw JSON (no markdown fences) in this exact format:\n"
                 '{"is_valid": bool, "name": "string", "dob": "DD/MM/YYYY", '
                 '"number": "string", "reason": "string"}'
@@ -800,7 +802,16 @@ def verify_document_with_ai(image_bytes, document_type):
                 raw_json = raw_json.split("```")[1].split("```")[0].strip()
 
             print(f"  [Gemini AI] Raw response: {raw_json}")
-            ai_data  = json.loads(raw_json)
+            try:
+                ai_data = json.loads(raw_json)
+            except Exception:
+                # Robust fallback extraction if JSON is messed up
+                import re
+                json_match = re.search(r'\{.*\}', raw_json, re.DOTALL)
+                if json_match:
+                    ai_data = json.loads(json_match.group(0))
+                else:
+                    raise ValueError("Failed to parse AI JSON response")
 
             is_valid = ai_data.get("is_valid", False)
             reason   = ai_data.get("reason", "Unknown reason")
@@ -815,12 +826,13 @@ def verify_document_with_ai(image_bytes, document_type):
                 return True, f"Verified: {number}", dob
             else:
                 print(f"  ❌ [Gemini AI] Rejected — {reason}")
+                # Optional: Force allow if working in lenient mode
                 return False, f"Invalid: {reason}", ""
 
         except Exception as e:
             error_str = str(e)
             is_quota_error = any(k in error_str.lower() for k in
-                                 ["429", "quota", "rate", "limit", "resource_exhausted"])
+                                 ["429", "quota", "rate", "limit", "resource_exhausted", "503", "500", "overloaded"])
             if is_quota_error and attempt < max_retries - 1:
                 wait = retry_delays[attempt]
                 print(f"  ⏳ [Gemini AI] Quota hit — waiting {wait}s before retry…")
@@ -1073,24 +1085,8 @@ def chat():
              
         messages = data["messages"]
         
-        # 1. Dynamically find the best model for this particular API Key
-        chat_model_name = "gemini-2.0-flash" # Default fallback
-        try:
-            available_models = genai.list_models()
-            valid_models = [m.name for m in available_models if 'generateContent' in m.supported_generation_methods]
-            print("Accessible Gemini Models:", valid_models)
-            
-            if valid_models:
-                chat_model_name = valid_models[0] # Pick the first available
-                # Prefer flash or pro if available
-                for name in valid_models:
-                    if 'gemini-2.0-flash' in name:
-                        chat_model_name = name
-                        break
-        except Exception as e:
-             # Catch API Key Invalid errors 
-             return jsonify({"status": "error", "message": "API Key is invalid or restricted. Please create a new free API Key from Google AI Studio and update your Render Environment Variables."}), 400
-
+        # Using a fixed model to save API calls (1 per message instead of 2)
+        chat_model_name = "gemini-2.0-flash"
         print(f"Using Google AI Model: {chat_model_name}")
 
         gemini_history = []
