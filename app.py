@@ -1070,35 +1070,23 @@ def chat():
             
         latest_message = messages[-1]["text"]
         
-        # Smart AI Model Hopping Architecture
-        # If the primary model hits a limit, it silently cascades to backup models 
-        # to ensure the user never gets a 429 API Limit Exceeded block.
-        models_to_run = [
-            "gemini-2.0-flash",        # Primary High-Speed Model
-            "gemini-1.5-flash",        # Backup 1
-            "gemini-1.5-flash-8b"      # Backup 2
-        ]
+        # Using exactly Gemini 1.5 Flash as requested by user
+        chat_model_name = "gemini-1.5-flash"
         
         reply_text = None
         last_error = ""
 
-        for chat_model_name in models_to_run:
-            try:
-                print(f"[Chatbot] Trying Google AI Model: {chat_model_name}...")
-                model = genai.GenerativeModel(model_name=chat_model_name)
-                chat_session = model.start_chat(history=gemini_history)
-                response = chat_session.send_message(latest_message)
-                reply_text = response.text
-                print(f"[Chatbot] Success using {chat_model_name}!")
-                break # Exit the loop if it worked!
-            except Exception as e:
-                error_str = str(e)
-                print(f"[Chatbot] Model {chat_model_name} failed: {error_str}")
-                last_error = error_str
-                # If it's a structural error (not a quota error) fail immediately
-                is_quota_error = any(k in error_str.lower() for k in ["429", "quota", "rate", "limit", "resource_exhausted", "503", "500", "overloaded"])
-                if not is_quota_error:
-                    break
+        try:
+            print(f"[Chatbot] Trying Google AI Model: {chat_model_name}...")
+            model = genai.GenerativeModel(model_name=chat_model_name)
+            chat_session = model.start_chat(history=gemini_history)
+            response = chat_session.send_message(latest_message)
+            reply_text = response.text
+            print(f"[Chatbot] Success using {chat_model_name}!")
+        except Exception as e:
+            error_str = str(e)
+            print(f"[Chatbot] Model {chat_model_name} failed: {error_str}")
+            last_error = error_str
         
         if reply_text is not None:
             return jsonify({
@@ -1106,11 +1094,10 @@ def chat():
                 "reply": reply_text
             })
         else:
-            # All models failed or exhausted
             if "429" in last_error or "quota" in last_error.lower() or "limit" in last_error.lower():
                 return jsonify({
                     "status": "error", 
-                    "message": "AI Rate Limit Exceeded: Google's free quotas are temporarily maxed out across all backup models. Please wait exactly 1 minute."
+                    "message": "AI Rate Limit Exceeded: Google's free quotas are temporarily maxed out. Please wait exactly 1 minute before sending another message."
                 }), 429
             return jsonify({"status": "error", "message": f"Server Error: {last_error}"}), 500
     except Exception as general_e:
