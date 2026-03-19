@@ -1070,8 +1070,8 @@ def chat():
             
         latest_message = messages[-1]["text"]
         
-        # Using exactly Gemini 1.5 Flash as requested by user
-        chat_model_name = "gemini-1.5-flash"
+        # Reverting to Gemini 2.0 Flash because 1.5 is explicitly disabled/404 on your API key
+        chat_model_name = "gemini-2.0-flash"
         
         reply_text = None
         last_error = ""
