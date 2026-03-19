@@ -25,12 +25,9 @@ from reportlab.lib import colors
 from deep_translator import GoogleTranslator
 import spacy
 import subprocess
-import google.generativeai as genai
+from groq import Groq
 
-# Setup Gemini API key
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
+# Google Generative AI has been removed entirely; Groq will handle the chatbot.
 
 SYSTEM_PROMPT = """You are a helpful and empathetic Police Assistant helping a user draft an FIR (First Information Report).
 Your goal is to gather the following details one by one from the user in a natural conversation:
@@ -1045,7 +1042,7 @@ def serve_pdf(filename):
     except Exception as e:
         return jsonify({"status": "error", "message": f"Server Error: {str(e)}"}), 500
 # ==================================================
-# 🤖 CHATBOT API (GEMINI GUIDED FIR)
+# 🤖 CHATBOT API (GROQ LLAMA-3 GUIDED FIR)
 # ==================================================
 @app.route('/chat', methods=['POST'])
 def chat():
@@ -1054,34 +1051,42 @@ def chat():
         if not data or "messages" not in data:
             return jsonify({"status": "error", "message": "Missing messages array"}), 400
             
-        if not GEMINI_API_KEY:
-             return jsonify({"status": "error", "message": "Backend is missing GEMINI_API_KEY environment variable. Chatbot is offline."}), 500
+        GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
+        if not GROQ_API_KEY:
+             return jsonify({"status": "error", "message": "Backend is missing GROQ_API_KEY environment variable. Chatbot is offline."}), 500
              
         messages = data["messages"]
         
-        gemini_history = []
-        # Inject system prompt into history for older model compatibility
-        gemini_history.append({"role": "user", "parts": [SYSTEM_PROMPT]})
-        gemini_history.append({"role": "model", "parts": ["[en-IN] Understood. I will act as the TrueFile AI Police Assistant, automatically detect the language, and gather the required FIR details."] })
+        # Using Llama 3.3 70B Versatile via Groq
+        chat_model_name = "llama-3.3-70b-versatile"
         
-        for msg in messages[:-1]: # All except the last one
-            role = "user" if msg["role"] == "user" else "model"
-            gemini_history.append({"role": role, "parts": [msg["text"]]})
+        groq_messages = []
+        # Inject system prompt into history
+        groq_messages.append({"role": "system", "content": SYSTEM_PROMPT})
+        groq_messages.append({"role": "assistant", "content": "[en-IN] Understood. I will act as the TrueFile AI Police Assistant, automatically detect the language, and gather the required FIR details."})
+        
+        for msg in messages:
+            role = "user" if msg["role"] == "user" else "assistant"
+            groq_messages.append({"role": role, "content": msg["text"]})
             
-        latest_message = messages[-1]["text"]
-        
-        # Reverting to Gemini 2.0 Flash because 1.5 is explicitly disabled/404 on your API key
-        chat_model_name = "gemini-2.0-flash"
-        
         reply_text = None
         last_error = ""
 
         try:
-            print(f"[Chatbot] Trying Google AI Model: {chat_model_name}...")
-            model = genai.GenerativeModel(model_name=chat_model_name)
-            chat_session = model.start_chat(history=gemini_history)
-            response = chat_session.send_message(latest_message)
-            reply_text = response.text
+            print(f"[Chatbot] Trying Groq AI Model: {chat_model_name}...")
+            client = Groq(api_key=GROQ_API_KEY)
+            
+            completion = client.chat.completions.create(
+                model=chat_model_name,
+                messages=groq_messages,
+                temperature=0.7,
+                max_completion_tokens=1024,
+                top_p=1,
+                stream=False,
+                stop=None,
+            )
+            
+            reply_text = completion.choices[0].message.content
             print(f"[Chatbot] Success using {chat_model_name}!")
         except Exception as e:
             error_str = str(e)
@@ -1094,10 +1099,10 @@ def chat():
                 "reply": reply_text
             })
         else:
-            if "429" in last_error or "quota" in last_error.lower() or "limit" in last_error.lower():
+            if "429" in last_error or "rate limit" in last_error.lower() or "limit" in last_error.lower():
                 return jsonify({
                     "status": "error", 
-                    "message": "AI Rate Limit Exceeded: Google's free quotas are temporarily maxed out. Please wait exactly 1 minute before sending another message."
+                    "message": "AI Rate Limit Exceeded: Groq's quotas are temporarily maxed out. Please wait exactly 1 minute before sending another message."
                 }), 429
             return jsonify({"status": "error", "message": f"Server Error: {last_error}"}), 500
     except Exception as general_e:
