@@ -755,120 +755,25 @@ def run_fraud_checks(original_img):
 
 # ── STAGE 2: GEMINI AI EXTRACTION + VALIDATION ───────────────────
 
-def verify_document_with_ai(image_bytes, document_type):
+def verify_document_with_ocr(image_bytes, document_type, filename="document.jpg"):
     """
-    Sends the OpenCV-enhanced image to Gemini AI.
-    Implements a Model Hopping strategy to bypass per-model rate limits.
+    NEW ARCHITECTURE: Bypasses Google Gemini entirely!
+    Stage 1 → OpenCV enhancement + quality check
+    Stage 2 → Sends image to OCR.space (Specialized FREE Cloud OCR)
+    Stage 3 → High-Accuracy Python Regex extracts Aadhaar/PAN and DOB from the raw text layout
     Returns (is_valid: bool, message: str, dob: str)
     """
-    if not GEMINI_API_KEY:
-        return False, "Gemini API key not configured on server", ""
-
-    import time
+    import requests
     
-    # Model Hopping Strategy: Bypasses individual model rate limits by switching models
-    models_to_try = [
-        "gemini-2.0-flash",        # Primary
-        "gemini-1.5-flash",        # Fallback 1
-        "gemini-1.5-flash-8b",     # Fallback 2
-        "gemini-1.5-pro"           # Fallback 3 (heaviest, use last)
-    ]
-    max_total_retries = len(models_to_try)
-
-    for attempt in range(max_total_retries):
-        model_name = models_to_try[attempt]
-        print(f"  [Gemini AI] Analysing {document_type} using {model_name} (attempt {attempt + 1}/{max_total_retries})…")
-        try:
-            model  = genai.GenerativeModel(model_name)
-            prompt = (
-                f"You are an expert Indian Document Analyst verifying an Indian {document_type}.\n\n"
-                "TASK:\n"
-                "1. Confirm the image shows the correct document type.\n"
-                "2. Extract: Full Name, Date of Birth (DD/MM/YYYY), Document Number.\n"
-                "3. Verify Name and DOB are present and consistent.\n\n"
-                "LENIENCY RULES:\n"
-                "- Background clutter, shadows, or slight angles are COMPLETELY ACCEPTABLE.\n"
-                "- ACCEPT TEST OR SAMPLE DOCUMENTS. Do NOT reject documents just because they have 'Sample', 'Test', or watermarks. This is a testing environment.\n"
-                "- Only reject if the document type is completely wrong (e.g., got a car instead of an ID).\n"
-                "- Ignore minor text overlaps or poor image quality.\n\n"
-                "Return ONLY raw JSON (no markdown fences) in this exact format:\n"
-                '{"is_valid": bool, "name": "string", "dob": "DD/MM/YYYY", '
-                '"number": "string", "reason": "string"}'
-            )
-
-            b64_image  = base64.b64encode(image_bytes).decode("utf-8")
-            image_part = {"inline_data": {"mime_type": "image/jpeg", "data": b64_image}}
-
-            response = model.generate_content([image_part, prompt])
-            raw_json = response.text.strip()
-
-            # Strip accidental markdown fences
-            if "```json" in raw_json:
-                raw_json = raw_json.split("```json")[1].split("```")[0].strip()
-            elif "```" in raw_json:
-                raw_json = raw_json.split("```")[1].split("```")[0].strip()
-
-            print(f"  [{model_name}] Raw response: {raw_json}")
-            try:
-                ai_data = json.loads(raw_json)
-            except Exception:
-                # Robust fallback extraction if JSON is messed up
-                import re
-                json_match = re.search(r'\{.*\}', raw_json, re.DOTALL)
-                if json_match:
-                    ai_data = json.loads(json_match.group(0))
-                else:
-                    raise ValueError("Failed to parse AI JSON response")
-
-            is_valid = ai_data.get("is_valid", False)
-            reason   = ai_data.get("reason", "Unknown reason")
-            dob      = _normalize_dob(ai_data.get("dob", ""))
-            number   = ai_data.get("number", "")
-
-            # Stage 3: Regex cross-validate Gemini output
-            number, dob = _regex_validate(number, dob, document_type)
-
-            if is_valid:
-                print(f"  ✅ [{model_name}] Verified — Number: {number} | DOB: {dob}")
-                return True, f"Verified: {number}", dob
-            else:
-                print(f"  ❌ [{model_name}] Rejected — {reason}")
-                return False, f"Invalid: {reason}", ""
-
-        except Exception as e:
-            error_str = str(e)
-            is_quota_error = any(k in error_str.lower() for k in
-                                 ["429", "quota", "rate", "limit", "resource_exhausted", "503", "500", "overloaded"])
-            print(f"  ⚠️ [{model_name}] Error: {error_str}")
-            
-            if is_quota_error and attempt < max_total_retries - 1:
-                # Instead of sleeping for 20s, instantly hop to the next model!
-                print(f"  ⏳ [Gemini AI] Quota/Limit hit on {model_name}. Instantly hopping to the next model...")
-                continue
-            
-            if not is_quota_error:
-                return False, f"AI Analysis Error: {error_str}", ""
-
-    return False, "Gemini quota exceeded across all available models. Please try again in 60 seconds.", ""
-
-# ── MAIN ENTRY POINT ─────────────────────────────────────────────
-
-def verify_document_with_gemini(image_bytes, document_type, filename="document.jpg"):
-    """
-    3-Stage document verification pipeline:
-      Stage 1 → OpenCV enhancement + quality check
-      Stage 2 → Gemini AI extraction + semantic validation
-      Stage 3 → Regex cross-validation of extracted number / DOB
-    Returns (is_valid: bool, message: str, dob: str)
-    """
     print(f"\n{'='*55}")
     print(f"  📄 Verifying: {document_type} [{filename}]")
     print(f"{'='*55}")
 
-    # Stage 1 — OpenCV
+    # Stage 1 — OpenCV Quality Check
     enhanced_bytes, original_cv, dimensions = preprocess_document_image(image_bytes)
     if original_cv is None:
         print("  [Stage 1] ⚠️ OpenCV failed — using raw bytes")
+        enhanced_bytes = image_bytes
     else:
         print(f"  [Stage 1] OpenCV ✅ — size: {dimensions}")
 
@@ -877,12 +782,73 @@ def verify_document_with_gemini(image_bytes, document_type, filename="document.j
         return False, quality_msg, ""
     print(f"  [Stage 1] Quality check ✅")
 
-    # Stage 2 + 3 — Gemini + Regex
-    is_valid, message, dob = verify_document_with_ai(enhanced_bytes, document_type)
-
-    print(f"  [Pipeline] Final → valid={is_valid} | dob={dob} | msg={message}")
-    print(f"{'='*55}\n")
-    return is_valid, message, dob
+    # Stage 2 — OCR.space Text Extraction
+    print(f"  [OCR.space] Reading text from {document_type}…")
+    b64_image = base64.b64encode(enhanced_bytes).decode("utf-8")
+    b64_string = f"data:image/jpeg;base64,{b64_image}"
+    
+    # Use environment key or the default free-tier fallback key 'helloworld'
+    api_key = os.environ.get("OCR_SPACE_API_KEY", "helloworld")
+    
+    payload = {
+        'apikey': api_key,
+        'base64Image': b64_string,
+        'language': 'eng',
+        'isOverlayRequired': False,
+        'OCREngine': 2, # Engine 2 is much more accurate for reading numbers on ID cards!
+        'scale': True
+    }
+    
+    try:
+        response = requests.post('https://api.ocr.space/parse/image', data=payload, timeout=25)
+        result = response.json()
+        
+        if result.get('IsErroredOnProcessing'):
+            err = result.get('ErrorMessage', ['Unknown Error'])[0]
+            print(f"  ❌ [OCR.space] Error: {err}")
+            return False, f"OCR Error: {err}", ""
+            
+        parsed_results = result.get('ParsedResults', [])
+        if not parsed_results:
+            print("  ❌ [OCR.space] No text extracted")
+            return False, "Could not extract any text from the provided image.", ""
+            
+        raw_text = parsed_results[0].get('ParsedText', '')
+        print("  [OCR] Raw Text Extracted from ID:")
+        print(f"    {repr(raw_text)}")
+        
+        # Stage 3 — Deterministic Regex Extraction
+        number_found = ""
+        dob_found = ""
+        
+        if "aadhaar" in document_type.lower():
+            m = _AADHAAR_RE.search(raw_text)
+            if m: number_found = re.sub(r'[\s\-]', '', m.group(1))
+        elif "pan" in document_type.lower():
+            m = _PAN_RE.search(raw_text.upper())
+            if m: number_found = m.group(1)
+            
+        dob_match = _DOB_RE.search(raw_text)
+        if dob_match:
+            raw_dob = dob_match.group(1) or dob_match.group(2)
+            dob_found = _normalize_dob(raw_dob)
+            
+        if number_found:
+            msg = f"Verified: {number_found}"
+            print(f"  ✅ [Regex] Passed! ID: {number_found} | DOB: {dob_found}")
+            print(f"{'='*55}\n")
+            return True, msg, dob_found
+        else:
+            print(f"  ❌ [Regex] Failed: Could not locate valid {document_type} pattern in text.")
+            print(f"{'='*55}\n")
+            return False, f"Invalid: Could not find valid {document_type} format in image", ""
+            
+    except requests.exceptions.RequestException as e:
+        print(f"  ⚠️ [OCR.space] Connection Error: {e}")
+        return False, "OCR Server connection failed. Ensure you have internet access.", ""
+    except Exception as e:
+        print(f"  ⚠️ [OCR.space] Unexpected Error: {e}")
+        return False, str(e), ""
 
 
 # ==================================================
@@ -930,7 +896,7 @@ def save_profile():
                         try: fs.delete(ObjectId(existing_profile["aadhaar_id"]))
                         except: pass
                     aadhaar_id = fs.put(aadhaar_bytes, filename="aadhaar.jpg", content_type="image/jpeg")
-                    aadhaar_verified, _, aadhaar_dob = verify_document_with_gemini(aadhaar_bytes, "Aadhaar Card")
+                    aadhaar_verified, _, aadhaar_dob = verify_document_with_ocr(aadhaar_bytes, "Aadhaar Card")
                     update_doc["aadhaar_id"]       = str(aadhaar_id)
                     update_doc["aadhaar_verified"] = aadhaar_verified
                     update_doc["aadhaar_dob"]      = aadhaar_dob
@@ -941,7 +907,7 @@ def save_profile():
                         try: fs.delete(ObjectId(existing_profile["pan_id"]))
                         except: pass
                     pan_id = fs.put(pan_bytes, filename="pan.jpg", content_type="image/jpeg")
-                    pan_verified, _, pan_dob = verify_document_with_gemini(pan_bytes, "PAN Card")
+                    pan_verified, _, pan_dob = verify_document_with_ocr(pan_bytes, "PAN Card")
                     update_doc["pan_id"]       = str(pan_id)
                     update_doc["pan_verified"] = pan_verified
                     update_doc["pan_dob"]      = pan_dob
@@ -1110,8 +1076,7 @@ def chat():
         models_to_run = [
             "gemini-2.0-flash",        # Primary High-Speed Model
             "gemini-1.5-flash",        # Backup 1
-            "gemini-1.5-flash-8b",     # Backup 2
-            "gemini-1.5-pro"           # Heavy Backup 3
+            "gemini-1.5-flash-8b"      # Backup 2
         ]
         
         reply_text = None
