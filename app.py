@@ -757,22 +757,29 @@ def run_fraud_checks(original_img):
 
 def verify_document_with_ai(image_bytes, document_type):
     """
-    Sends the OpenCV-enhanced image to Gemini 2.0 Flash.
-    Gemini extracts Name, DOB, Document Number and validates authenticity.
-    Auto-retries up to 3 times on quota/rate-limit errors with backoff.
+    Sends the OpenCV-enhanced image to Gemini AI.
+    Implements a Model Hopping strategy to bypass per-model rate limits.
     Returns (is_valid: bool, message: str, dob: str)
     """
     if not GEMINI_API_KEY:
         return False, "Gemini API key not configured on server", ""
 
     import time
-    max_retries = 3
-    retry_delays = [20, 40, 60]  # seconds between retries on quota error
+    
+    # Model Hopping Strategy: Bypasses individual model rate limits by switching models
+    models_to_try = [
+        "gemini-2.0-flash",        # Primary
+        "gemini-1.5-flash",        # Fallback 1
+        "gemini-1.5-flash-8b",     # Fallback 2
+        "gemini-1.5-pro"           # Fallback 3 (heaviest, use last)
+    ]
+    max_total_retries = len(models_to_try)
 
-    for attempt in range(max_retries):
-        print(f"  [Gemini AI] Analysing {document_type} (attempt {attempt + 1}/{max_retries})…")
+    for attempt in range(max_total_retries):
+        model_name = models_to_try[attempt]
+        print(f"  [Gemini AI] Analysing {document_type} using {model_name} (attempt {attempt + 1}/{max_total_retries})…")
         try:
-            model  = genai.GenerativeModel("gemini-2.0-flash")
+            model  = genai.GenerativeModel(model_name)
             prompt = (
                 f"You are an expert Indian Document Analyst verifying an Indian {document_type}.\n\n"
                 "TASK:\n"
@@ -801,7 +808,7 @@ def verify_document_with_ai(image_bytes, document_type):
             elif "```" in raw_json:
                 raw_json = raw_json.split("```")[1].split("```")[0].strip()
 
-            print(f"  [Gemini AI] Raw response: {raw_json}")
+            print(f"  [{model_name}] Raw response: {raw_json}")
             try:
                 ai_data = json.loads(raw_json)
             except Exception:
@@ -822,26 +829,27 @@ def verify_document_with_ai(image_bytes, document_type):
             number, dob = _regex_validate(number, dob, document_type)
 
             if is_valid:
-                print(f"  ✅ [Gemini AI] Verified — Number: {number} | DOB: {dob}")
+                print(f"  ✅ [{model_name}] Verified — Number: {number} | DOB: {dob}")
                 return True, f"Verified: {number}", dob
             else:
-                print(f"  ❌ [Gemini AI] Rejected — {reason}")
-                # Optional: Force allow if working in lenient mode
+                print(f"  ❌ [{model_name}] Rejected — {reason}")
                 return False, f"Invalid: {reason}", ""
 
         except Exception as e:
             error_str = str(e)
             is_quota_error = any(k in error_str.lower() for k in
                                  ["429", "quota", "rate", "limit", "resource_exhausted", "503", "500", "overloaded"])
-            if is_quota_error and attempt < max_retries - 1:
-                wait = retry_delays[attempt]
-                print(f"  ⏳ [Gemini AI] Quota hit — waiting {wait}s before retry…")
-                time.sleep(wait)
-                continue  # retry
-            print(f"  ⚠️ [Gemini AI] Error: {error_str}")
-            return False, f"AI Analysis Error: {error_str}", ""
+            print(f"  ⚠️ [{model_name}] Error: {error_str}")
+            
+            if is_quota_error and attempt < max_total_retries - 1:
+                # Instead of sleeping for 20s, instantly hop to the next model!
+                print(f"  ⏳ [Gemini AI] Quota/Limit hit on {model_name}. Instantly hopping to the next model...")
+                continue
+            
+            if not is_quota_error:
+                return False, f"AI Analysis Error: {error_str}", ""
 
-    return False, "Gemini quota exceeded after retries. Please try again in a minute.", ""
+    return False, "Gemini quota exceeded across all available models. Please try again in 60 seconds.", ""
 
 # ── MAIN ENTRY POINT ─────────────────────────────────────────────
 
@@ -1085,10 +1093,6 @@ def chat():
              
         messages = data["messages"]
         
-        # Using a fixed model to save API calls (1 per message instead of 2)
-        chat_model_name = "gemini-2.0-flash"
-        print(f"Using Google AI Model: {chat_model_name}")
-
         gemini_history = []
         # Inject system prompt into history for older model compatibility
         gemini_history.append({"role": "user", "parts": [SYSTEM_PROMPT]})
@@ -1100,24 +1104,52 @@ def chat():
             
         latest_message = messages[-1]["text"]
         
-        model = genai.GenerativeModel(model_name=chat_model_name)
+        # Smart AI Model Hopping Architecture
+        # If the primary model hits a limit, it silently cascades to backup models 
+        # to ensure the user never gets a 429 API Limit Exceeded block.
+        models_to_run = [
+            "gemini-2.0-flash",        # Primary High-Speed Model
+            "gemini-1.5-flash",        # Backup 1
+            "gemini-1.5-flash-8b",     # Backup 2
+            "gemini-1.5-pro"           # Heavy Backup 3
+        ]
         
-        chat_session = model.start_chat(history=gemini_history)
-        response = chat_session.send_message(latest_message)
+        reply_text = None
+        last_error = ""
+
+        for chat_model_name in models_to_run:
+            try:
+                print(f"[Chatbot] Trying Google AI Model: {chat_model_name}...")
+                model = genai.GenerativeModel(model_name=chat_model_name)
+                chat_session = model.start_chat(history=gemini_history)
+                response = chat_session.send_message(latest_message)
+                reply_text = response.text
+                print(f"[Chatbot] Success using {chat_model_name}!")
+                break # Exit the loop if it worked!
+            except Exception as e:
+                error_str = str(e)
+                print(f"[Chatbot] Model {chat_model_name} failed: {error_str}")
+                last_error = error_str
+                # If it's a structural error (not a quota error) fail immediately
+                is_quota_error = any(k in error_str.lower() for k in ["429", "quota", "rate", "limit", "resource_exhausted", "503", "500", "overloaded"])
+                if not is_quota_error:
+                    break
         
-        return jsonify({
-            "status": "success",
-            "reply": response.text
-        })
-    except Exception as e:
-        error_str = str(e)
-        print(f"Chat Error: {error_str}")
-        if "429" in error_str or "quota" in error_str.lower() or "limit" in error_str.lower():
+        if reply_text is not None:
             return jsonify({
-                "status": "error", 
-                "message": "AI Rate Limit Exceeded: You are talking too fast and hit the free API limit! Please wait 10 seconds and try your message again."
-            }), 429
-        return jsonify({"status": "error", "message": f"Server Error: {error_str}"}), 500
+                "status": "success",
+                "reply": reply_text
+            })
+        else:
+            # All models failed or exhausted
+            if "429" in last_error or "quota" in last_error.lower() or "limit" in last_error.lower():
+                return jsonify({
+                    "status": "error", 
+                    "message": "AI Rate Limit Exceeded: Google's free quotas are temporarily maxed out across all backup models. Please wait exactly 1 minute."
+                }), 429
+            return jsonify({"status": "error", "message": f"Server Error: {last_error}"}), 500
+    except Exception as general_e:
+        return jsonify({"status": "error", "message": f"Server Error: {str(general_e)}"}), 500
 
 # ==================================================
 # 🏠 HOME
