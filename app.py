@@ -563,6 +563,15 @@ def confirm_fir():
 
         fir_record = fir_data_payload.copy()
         
+        # Override with mathematically verified User Profile data if available
+        user = users_col.find_one({"email": email})
+        if user:
+            print(f"Injecting verified profile data for {email}")
+            if user.get("dob"):
+                fir_record["complainant_dob_year"] = user.get("dob")
+            if user.get("name"):
+                fir_record["complainant_name"] = user.get("name")
+        
         # Merge system fields
         fir_record.update({
             "fir_id": fir_id,
