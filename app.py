@@ -825,10 +825,29 @@ def verify_document_with_ocr(image_bytes, document_type, filename="document.jpg"
             m = _PAN_RE.search(raw_text.upper())
             if m: number_found = m.group(1)
             
-        dob_match = _DOB_RE.search(raw_text)
-        if dob_match:
-            raw_dob = dob_match.group(1) or dob_match.group(2)
-            dob_found = _normalize_dob(raw_dob)
+        # CRITICAL FIX: Find ALL dates in the OCR text
+        all_dates = _DOB_RE.findall(raw_text)
+        valid_date_objs = []
+        
+        from datetime import datetime
+        
+        for match_tuple in all_dates:
+            raw_d = match_tuple[0] or match_tuple[1]
+            if not raw_d: continue
+            
+            norm_str = _normalize_dob(raw_d)
+            try:
+                # Attempt to parse into a strict datetime object to compare historical age
+                dt = datetime.strptime(norm_str, "%d/%m/%Y")
+                valid_date_objs.append((dt, norm_str))
+            except Exception:
+                pass
+                
+        if valid_date_objs:
+            # The Date of Birth is mathematically ALWAYS older than the Date of Issue!
+            # We sort all found dates from oldest to newest, and pick the absolute oldest one.
+            valid_date_objs.sort(key=lambda x: x[0])
+            dob_found = valid_date_objs[0][1]
             
         if number_found:
             msg = f"Verified: {number_found}"
