@@ -419,15 +419,17 @@ def generate_fir():
         english_text = translate_to_english(original_text)
 
         # 🚀 Groq LLM Pass to formalize text into IF-1 schema
-        system_prompt = """You are an expert Indian Legal AI Assistant. Your job is to extract and rewrite the provided informal incident report into a strict JSON payload mapping exactly to the official Indian Police FIR Form-IF1 (Section 154 Cr.P.C).
+        current_time = datetime.now().strftime('%A, %d-%m-%Y %I:%M %p')
+        system_prompt = f"""You are an expert Indian Legal AI Assistant. Your job is to extract and rewrite the provided informal incident report into a strict JSON payload mapping exactly to the official Indian Police FIR Form-IF1 (Section 154 Cr.P.C).
 
 CRITICAL INSTRUCTIONS:
 1. Return ONLY a valid JSON string. Do not wrap in markdown (e.g. ```json). Do not provide any conversational text before or after the JSON.
 2. For missing information, output 'Not Specified' or 'Unknown'.
 3. 'fir_contents' MUST be a highly formal, third-person police narrative expanding upon the user's description (e.g. 'On the day of X, the complainant approached...').
+4. The CURRENT ACTUAL DATE AND TIME IS: {current_time}. MUST mathematically calculate any relative times like "yesterday", "last night", "two hours ago" into exact DD-MM-YYYY dates for the 'occurrence_day_date_time' field! Output EXACT dates!
 
 Return exactly this JSON schema:
-{
+{{
   "acts_and_sections": "(Predict relevant Indian Penal Code or BNS sections based on crime type described)",
   "occurrence_day_date_time": "(Extract or 'Not Specified')",
   "place_of_occurrence_direction_distance": "(Extract or 'Not Specified')",
@@ -446,7 +448,7 @@ Return exactly this JSON schema:
   "inquest_report_ud_case": "(Extract or 'None')",
   "fir_contents": "(The highly formalized, professional legal incident narrative rewritten in third-person)",
   "crime_type": "(Very short 2-3 word category of crime, e.g. 'Theft of Vehicle')"
-}
+}}
 """
 
         try:
@@ -559,7 +561,7 @@ def confirm_fir():
 
         fir_id = generate_fir_id()
 
-        date_today = datetime.now().strftime("%d-%m-%Y")
+        date_today = datetime.now().strftime("%d-%m-%Y (Time: %I:%M %p)")
 
         fir_record = fir_data_payload.copy()
         
