@@ -29,15 +29,17 @@ from groq import Groq
 
 # Google Generative AI has been removed entirely; Groq will handle the chatbot.
 
-SYSTEM_PROMPT = """You are a helpful and empathetic Police Assistant helping a user draft an FIR (First Information Report).
+SYSTEM_PROMPT = """You are an official Indian Police Assistant helping a user draft an FIR.
 Your goal is to gather the following details one by one from the user in a natural conversation:
-1. Complainant Name
-2. Age
+1. Complainant Name & Father's/Husband's Name
+2. Complainant Age/DOB, Occupation, and Address
 3. Contact Number / Email
-4. Incident Date and Time
-5. Location of the Incident
-6. Respondent Details (who committed the crime, if known)
-7. The Incident Description (what happened)
+4. Exact Date, Time, and Day of the Incident
+5. Exact Location/Address of the Incident (Direction/Distance from Police Station if known)
+6. Suspect/Accused Details (Name, appearance, vehicle, etc.)
+7. Details of any Stolen or Involved Properties (and total value)
+8. Reasons for delay in reporting (if any)
+9. The full Incident Narrative (what happened)
 
 Rules:
 - Be empathetic and professional.
@@ -214,116 +216,111 @@ def generate_pdf(fir_data, fir_id):
     os.makedirs("pdfs", exist_ok=True)
     file_name = os.path.join("pdfs", f"{fir_id}.pdf")
     
-    doc = SimpleDocTemplate(file_name, pagesize=A4, rightMargin=30, leftMargin=30, topMargin=40, bottomMargin=30)
+    doc = SimpleDocTemplate(file_name, pagesize=A4, rightMargin=40, leftMargin=40, topMargin=50, bottomMargin=40)
     elements = []
     
     styles = getSampleStyleSheet()
-    title_style = ParagraphStyle(
-        name='TitleStyle',
-        parent=styles['Heading1'],
-        alignment=1, # Center
-        fontSize=18,
-        spaceAfter=5
-    )
-    sub_title_style = ParagraphStyle(
-        name='SubTitle', 
-        parent=styles['Normal'], 
-        alignment=1, 
-        fontSize=9,
-        leading=11,
-        spaceAfter=20
-    )
-    normal_style = styles['Normal']
     
-    # 1. Header
-    header_style = ParagraphStyle(
-        name='HeaderStyle',
-        parent=styles['Normal'],
-        alignment=0, # Left aligned
-        fontSize=12,
-        spaceAfter=15
-    )
-    elements.append(Paragraph("<b>Police Department<br/>Official FIR Report</b>", header_style))
-
-    elements.append(Paragraph("<b>INCIDENT REPORT</b>", title_style))
-    elements.append(Paragraph("", sub_title_style))
-
-    # 2. Main Large Table
-    table_data = []
-
-    # Row 1: Date
-    table_data.append([Paragraph(f"<b>Date:</b> {fir_data.get('date', datetime.now().strftime('%d %B %Y'))}", normal_style), ""])
+    # Custom Styles matching the form
+    title_style = ParagraphStyle(name='Title', parent=styles['Normal'], alignment=1, fontName='Helvetica-Bold', fontSize=12, spaceAfter=5)
+    sub_title = ParagraphStyle(name='SubTitle', parent=styles['Normal'], alignment=1, fontSize=11, spaceAfter=20)
     
-    # Row 2: Location
-    table_data.append([Paragraph(f"<b>Location:</b> {fir_data.get('place', 'Unknown')}", normal_style), ""])
-
-    # Row 3: Complainant Details (Split columns)
-    table_data.append([
-        Paragraph("<b>Complainant Details:</b><br/>" + fir_data.get('name', 'Unknown').split()[0], normal_style),
-        Paragraph("<b>Last Name:</b><br/>" + (fir_data.get('name', 'Unknown').split()[-1] if len(fir_data.get('name', 'Unknown').split()) > 1 else ""), normal_style)
-    ])
-
-    # Row 4: Respondent Details
-    table_data.append([Paragraph(f"<b>Respondent Details:</b><br/>{fir_data.get('respondent', 'Unknown')}", normal_style), ""])
-
-    # Row 5: Address (Split)
-    table_data.append([
-        Paragraph("<b>Address:</b><br/>" + fir_data.get('address', 'Unknown'), normal_style),
-        Paragraph("<b>Contact number:</b><br/>" + fir_data.get('contact', fir_data.get('email', 'Unknown')), normal_style)
-    ])
-
-    # Row 6: Height/Age
-    table_data.append([
-        Paragraph("<b>Complainant Height:</b> " + fir_data.get('height', 'Unknown'), normal_style),
-        Paragraph("<b>Age:</b> " + fir_data.get('age', 'Unknown'), normal_style)
-    ])
-
-    # Row 7: Pen Name
-    table_data.append([
-         Paragraph("<b>Pen Name:</b><br/>Complainant details", normal_style),
-         Paragraph("<b>Community:</b>", normal_style)
-    ])
-
-    # Row 8: Incident Description
-    desc_para = Paragraph("<b>Incident Description:</b><br/>" + fir_data.get('description', 'No description provided.'), normal_style)
-    table_data.append([desc_para, ""])
-
-    # Removed redundant Complainant Information rows here
-
-
-    # Construct Table
-    t = Table(table_data, colWidths=[260, 260])
-
-    # Add complex spanning and grid styling to match the image exactly
-    grid_style = [
-        # Box around the entire table
-        ('BOX', (0,0), (-1,-1), 1, colors.black),
-        ('INNERGRID', (0,0), (-1,-1), 0.5, colors.black),
-        
-        # Span columns for full-width rows
-        ('SPAN', (0,0), (1,0)), # Date
-        ('SPAN', (0,1), (1,1)), # Location
-        ('SPAN', (0,3), (1,3)), # Respondent
-        ('SPAN', (0,7), (1,7)), # Description (make it tall)
-        
-        # Padding
-        ('TOPPADDING', (0,0), (-1,-1), 6),
-        ('BOTTOMPADDING', (0,0), (-1,-1), 6),
-        ('LEFTPADDING', (0,0), (-1,-1), 10),
-        ('RIGHTPADDING', (0,0), (-1,-1), 10),
-    ]
-
-    t.setStyle(TableStyle(grid_style))
-    elements.append(t)
+    body = ParagraphStyle(name='Body', parent=styles['Normal'], fontSize=10, leading=15, spaceAfter=8)
+    body_indent = ParagraphStyle(name='BodyIndent', parent=styles['Normal'], fontSize=10, leading=15, leftIndent=20, spaceAfter=8)
+    body_indent2 = ParagraphStyle(name='BodyIndent2', parent=styles['Normal'], fontSize=10, leading=15, leftIndent=40, spaceAfter=8)
     
-    # 3. Footer (Signatures)
+    # Header
+    elements.append(Paragraph("<b>FORM – IF1 - (Integrated Form)</b>", title_style))
+    elements.append(Paragraph("<b>FIRST INFORMATION REPORT</b>", title_style))
+    elements.append(Paragraph("(Under Section 154 Cr.P.C)", sub_title))
+    
+    # Extract data safely with fallbacks
+    date_val = fir_data.get('date', datetime.now().strftime('%d %B %Y'))
+    acts = fir_data.get('acts_and_sections', 'Not Specified')
+    occ_date = fir_data.get('occurrence_day_date_time', 'Unknown')
+    place_dist = fir_data.get('place_of_occurrence_direction_distance', 'Unknown')
+    place_addr = fir_data.get('place_of_occurrence_address', 'Unknown')
+    
+    c_name = fir_data.get('complainant_name', 'Unknown')
+    c_father = fir_data.get('complainant_father_husband_name', 'Unknown')
+    c_dob = fir_data.get('complainant_dob_year', 'Unknown')
+    c_nat = fir_data.get('complainant_nationality', 'Indian')
+    c_pass = fir_data.get('complainant_passport', 'Not Specified')
+    c_occ = fir_data.get('complainant_occupation', 'Not Specified')
+    c_addr = fir_data.get('complainant_address', 'Unknown')
+    
+    suspect = fir_data.get('suspect_details', 'Unknown')
+    delay = fir_data.get('reasons_for_delay', 'None stated')
+    stolen = fir_data.get('stolen_properties', 'None')
+    stolen_val = fir_data.get('total_value_stolen', 'N/A')
+    inquest = fir_data.get('inquest_report_ud_case', 'None')
+    contents = fir_data.get('fir_contents', 'No description provided.')
+
+    # Form Lines
+    elements.append(Paragraph(f"1. Dist: <b>Central</b> &nbsp;&nbsp;&nbsp;&nbsp; P.S: <b>Cyber Crime Cell</b> &nbsp;&nbsp;&nbsp;&nbsp; Year: <b>{datetime.now().year}</b> &nbsp;&nbsp;&nbsp;&nbsp; F.I.R. No: <b>{fir_id}</b> &nbsp;&nbsp;&nbsp;&nbsp; Date: <b>{date_val}</b>", body))
+    elements.append(Paragraph(f"2. Acts & Sections: <b>{acts}</b>", body))
+    elements.append(Paragraph(f"3. (a) Occurrence of Offence: <b>{occ_date}</b>", body))
+    elements.append(Paragraph(f"&nbsp;&nbsp;&nbsp;(b) Information received at P.S. Date: <b>{date_val}</b>", body))
+    elements.append(Paragraph(f"&nbsp;&nbsp;&nbsp;(c) General Diary Reference: Entry No. ________ Time: ________", body))
+    elements.append(Paragraph(f"4. Type of information: <b>Written / Portal UI</b>", body))
+    
+    elements.append(Paragraph(f"5. Place of occurrence:", body))
+    elements.append(Paragraph(f"(a) Direction and Distance from P.S: <b>{place_dist}</b>", body_indent))
+    elements.append(Paragraph(f"(b) Address: <b>{place_addr}</b>", body_indent))
+    elements.append(Paragraph(f"(c) In case outside limit of this Police Station, then Name of P.S: _______", body_indent))
+    
+    elements.append(Paragraph(f"6. Complainant / information:", body))
+    elements.append(Paragraph(f"(a) Name: <b>{c_name}</b>", body_indent))
+    elements.append(Paragraph(f"(b) Father's / Husband's Name: <b>{c_father}</b>", body_indent))
+    elements.append(Paragraph(f"(c) Date / Year of Birth: <b>{c_dob}</b> &nbsp;&nbsp;&nbsp; (d) Nationality: <b>{c_nat}</b>", body_indent))
+    elements.append(Paragraph(f"(e) Passport No: <b>{c_pass}</b> &nbsp;&nbsp;&nbsp; Date of Issue: _______ Place of Issue: _______", body_indent))
+    elements.append(Paragraph(f"(f) Occupation: <b>{c_occ}</b>", body_indent))
+    elements.append(Paragraph(f"(g) Address: <b>{c_addr}</b>", body_indent))
+
+    elements.append(Paragraph(f"7. Details of known / suspected / unknown accused with full particulars:", body))
+    elements.append(Paragraph(f"<b>{suspect}</b>", body_indent))
+    
+    elements.append(Paragraph(f"8. Reasons for delay in reporting by the complainant / Informant:", body))
+    elements.append(Paragraph(f"<b>{delay}</b>", body_indent))
+
+    elements.append(Paragraph(f"9. Particulars of properties stolen / involved:", body))
+    elements.append(Paragraph(f"<b>{stolen}</b>", body_indent))
+    
+    elements.append(Paragraph(f"10. Total value of the properties stolen / involved: <b>{stolen_val}</b>", body))
+    elements.append(Paragraph(f"11. Inquest Report / U.D. Case No., if any: <b>{inquest}</b>", body))
+    
+    elements.append(Paragraph(f"12. F.I.R. Contents (Attach separate sheets, if required):", body))
+    
+    # Highly formal narrative box
+    narrative_style = ParagraphStyle(name='Narrative', parent=styles['Normal'], fontSize=10, leading=16, leftIndent=5, rightIndent=5, spaceBefore=5, spaceAfter=15, justify=True)
+    elements.append(Paragraph(contents.replace('\n', '<br/>'), narrative_style))
+
+    # Footer
+    elements.append(Paragraph(f"13. Action taken: Since the above report reveals commission of offence (s) u/s as mentioned at Item No. 2., registered the case and took up the investigation / directed ____________ Rank ____________ to take up the investigation.", body))
+    elements.append(Paragraph(f"F.I.R. read over to the complainant / Informant, admitted to be correctly recorded and a copy given to the complainant / Informant free of cost.", body))
+    
     elements.append(Spacer(1, 40))
-    elements.append(Paragraph("Investigating Officer Signature: ______________________", normal_style))
+    
+    # Signature Layout using Table for left/right alignment
+    sig_data = [
+        [
+            Paragraph("<b>Signature / Thumb-impression<br/>of the complainant / informant</b>", body), 
+            Paragraph("<b>Signature of the Officer-in-charge, Police Station</b><br/>Name: __________________________<br/>Rank: ________________ No: ________", body)
+        ]
+    ]
+    sig_table = Table(sig_data, colWidths=[250, 260])
+    sig_table.setStyle(TableStyle([
+        ('VALIGN', (0,0), (-1,-1), 'BOTTOM'),
+        ('ALIGN', (1,0), (1,0), 'RIGHT')
+    ]))
+    elements.append(sig_table)
+    
     elements.append(Spacer(1, 20))
-    elements.append(Paragraph("Station Seal: ______________________", normal_style))
+    elements.append(Paragraph(f"15. Date & time of despatch to the court: <b>{date_val}</b>", body))
     
     doc.build(elements, onFirstPage=add_watermark, onLaterPages=add_watermark)
     return file_name
+
 
 # ==================================================
 # 👤 REGISTER USER
@@ -419,50 +416,111 @@ def generate_fir():
              return jsonify({"status": "error", "message": "Missing description"}), 400
              
         original_text = data["description"]
-
         english_text = translate_to_english(original_text)
 
-        crime = detect_crime_type(english_text)
-        entities = extract_entities(english_text)
-        name = entities.get("name", "Unknown")
-        respondent = entities.get("respondent", "Unknown")
-        place = entities.get("place", "Unknown")
-        address = entities.get("address", "Unknown")
-        contact = entities.get("contact", "Unknown")
-        age = entities.get("age", "Unknown")
-        height = entities.get("height", "Unknown")
-        demographic = entities.get("demographic", "Unknown")
+        # 🚀 Groq LLM Pass to formalize text into IF-1 schema
+        system_prompt = """You are an expert Indian Legal AI Assistant. Your job is to extract and rewrite the provided informal incident report into a strict JSON payload mapping exactly to the official Indian Police FIR Form-IF1 (Section 154 Cr.P.C).
+
+CRITICAL INSTRUCTIONS:
+1. Return ONLY a valid JSON string. Do not wrap in markdown (e.g. ```json). Do not provide any conversational text before or after the JSON.
+2. For missing information, output 'Not Specified' or 'Unknown'.
+3. 'fir_contents' MUST be a highly formal, third-person police narrative expanding upon the user's description (e.g. 'On the day of X, the complainant approached...').
+
+Return exactly this JSON schema:
+{
+  "acts_and_sections": "(Predict relevant Indian Penal Code or BNS sections based on crime type described)",
+  "occurrence_day_date_time": "(Extract or 'Not Specified')",
+  "place_of_occurrence_direction_distance": "(Extract or 'Not Specified')",
+  "place_of_occurrence_address": "(Extract or 'Not Specified')",
+  "complainant_name": "(Extract or 'Unknown')",
+  "complainant_father_husband_name": "(Extract or 'Not Specified')",
+  "complainant_dob_year": "(Extract or 'Not Specified')",
+  "complainant_nationality": "Indian",
+  "complainant_passport": "(Extract or 'Not Specified')",
+  "complainant_occupation": "(Extract or 'Not Specified')",
+  "complainant_address": "(Extract or 'Not Specified')",
+  "suspect_details": "(Extract or 'Unknown')",
+  "reasons_for_delay": "(Extract or 'None stated')",
+  "stolen_properties": "(Extract detailed list or 'None')",
+  "total_value_stolen": "(Extract or 'N/A')",
+  "inquest_report_ud_case": "(Extract or 'None')",
+  "fir_contents": "(The highly formalized, professional legal incident narrative rewritten in third-person)",
+  "crime_type": "(Very short 2-3 word category of crime, e.g. 'Theft of Vehicle')"
+}
+"""
+
+        try:
+            groq_client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
+            response = groq_client.chat.completions.create(
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": f"Incident Description:\n{english_text}"}
+                ],
+                model="llama-3.3-70b-versatile",
+                temperature=0.2,
+                max_tokens=2048
+            )
+            raw_json_str = response.choices[0].message.content.strip()
+            
+            # Remove markdown backticks if Groq ignored the instruction
+            if raw_json_str.startswith("```"):
+                raw_json_str = re.sub(r'^```[a-zA-Z]*\n', '', raw_json_str)
+                raw_json_str = re.sub(r'\n```$', '', raw_json_str)
+            
+            import json
+            fir_form_data = json.loads(raw_json_str)
+            
+        except Exception as e:
+            print("Groq Extract Error:", e)
+            # Fallback to older basic extraction
+            crime = detect_crime_type(english_text)
+            entities = extract_entities(english_text)
+            fir_form_data = {
+                "acts_and_sections": "Relevant sections to be added",
+                "occurrence_day_date_time": "Unknown",
+                "place_of_occurrence_direction_distance": "Unknown",
+                "place_of_occurrence_address": entities.get("address", "Unknown"),
+                "complainant_name": entities.get("name", "Unknown"),
+                "complainant_father_husband_name": "Unknown",
+                "complainant_dob_year": entities.get("age", "Unknown"),
+                "complainant_nationality": "Indian",
+                "complainant_passport": "Unknown",
+                "complainant_occupation": "Unknown",
+                "complainant_address": "Unknown",
+                "suspect_details": entities.get("respondent", "Unknown"),
+                "reasons_for_delay": "None stated",
+                "stolen_properties": "None",
+                "total_value_stolen": "N/A",
+                "inquest_report_ud_case": "None",
+                "fir_contents": english_text,
+                "crime_type": crime
+            }
 
         date_today = datetime.now().strftime("%d-%m-%Y")
+        fir_form_data["contact"] = extract_entities(english_text).get("contact", "Unknown") # preserve contact
+        fir_form_data["date"] = date_today
 
-        fir_text = f"""FIRST INFORMATION REPORT (FIR)
+        # Create a nice plaintext digest for the Flutter app preview screen
+        fir_text_preview = f"""**Form - IF1 (Integrated Form) Preview**
+*Under Section 154 Cr.P.C*
 
-Date: {date_today}
-Crime Type: {crime}
-Place: {place}
+**Acts & Sections:** {fir_form_data.get('acts_and_sections')}
+**Occurrence:** {fir_form_data.get('occurrence_day_date_time')}
+**Place:** {fir_form_data.get('place_of_occurrence_address')}
 
-Complainant: {name}
+**Complainant:** {fir_form_data.get('complainant_name')} (Father: {fir_form_data.get('complainant_father_husband_name')})
+**Suspect Details:** {fir_form_data.get('suspect_details')}
+**Stolen Properties:** {fir_form_data.get('stolen_properties')} (Est. Value: {fir_form_data.get('total_value_stolen')})
+**Reasons for Delay:** {fir_form_data.get('reasons_for_delay')}
 
-Incident:
-{english_text}
+**F.I.R. Contents:**
+{fir_form_data.get('fir_contents')}
 """
 
         return jsonify({
-            "status": "success", # Added standard status
-            "fir_draft": fir_text.strip(),
-            "fir_data": {
-                "date": date_today,
-                "crime_type": crime,
-                "place": place,
-                "name": name,
-                "description": english_text,
-                "respondent": respondent,
-                "address": address,
-                "contact": contact,
-                "age": age,
-                "height": height,
-                "demographic": demographic
-            },
+            "status": "success",
+            "fir_draft": fir_text_preview.strip(),
+            "fir_data": fir_form_data,
             "translated_text": english_text
         })
     except Exception as e:
@@ -479,9 +537,13 @@ def confirm_fir():
             data = request.get_json()
             description = data.get("description")
             email = data.get("email", "guest")
+            fir_data_payload = data.get("fir_data", {})
         else:
             description = request.form.get("description")
             email = request.form.get("email", "guest")
+            fir_data_payload_str = request.form.get("fir_data", "{}")
+            import json
+            fir_data_payload = json.loads(fir_data_payload_str)
             
         if not description:
              return jsonify({"status": "error", "message": "Missing description"}), 400
@@ -497,36 +559,20 @@ def confirm_fir():
 
         fir_id = generate_fir_id()
 
-        crime = detect_crime_type(description)
-        entities = extract_entities(description)
-        name = entities.get("name", "Unknown")
-        respondent = entities.get("respondent", "Unknown")
-        place = entities.get("place", "Unknown")
-        address = entities.get("address", "Unknown")
-        contact = entities.get("contact", "Unknown")
-        age = entities.get("age", "Unknown")
-        height = entities.get("height", "Unknown")
-        demographic = entities.get("demographic", "Unknown")
-
         date_today = datetime.now().strftime("%d-%m-%Y")
 
-        fir_record = {
+        fir_record = fir_data_payload.copy()
+        
+        # Merge system fields
+        fir_record.update({
             "fir_id": fir_id,
             "email": email,
-            "crime_type": crime,
-            "name": name,
-            "respondent": respondent,
-            "place": place,
-            "address": address,
-            "contact": contact,
-            "age": age,
-            "height": height,
-            "demographic": demographic,
             "description": description,
             "evidence_id": evidence_id,
             "date": date_today,
-            "status": "Pending" 
-        }
+            "status": "Pending",
+            "crime_type": detect_crime_type(description)
+        })
 
         firs_col.insert_one(fir_record)
 
