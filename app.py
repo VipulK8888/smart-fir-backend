@@ -453,16 +453,29 @@ Return exactly this JSON schema:
 
         try:
             groq_client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
-            response = groq_client.chat.completions.create(
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": f"Incident Description:\n{english_text}"}
-                ],
-                model="llama-3.3-70b-versatile",
-                temperature=0.2,
-                max_tokens=2048
-            )
-            raw_json_str = response.choices[0].message.content.strip()
+            models_to_try = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "llama3-8b-8192"]
+            raw_json_str = None
+            
+            for model_name in models_to_try:
+                try:
+                    response = groq_client.chat.completions.create(
+                        messages=[
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": f"Incident Description:\n{english_text}"}
+                        ],
+                        model=model_name,
+                        temperature=0.2,
+                        max_tokens=2048
+                    )
+                    raw_json_str = response.choices[0].message.content.strip()
+                    break # Success
+                except Exception as e:
+                    print(f"Model {model_name} failed: {e}")
+                    if "429" in str(e) or "rate limit" in str(e).lower():
+                        break # Stop trying if rate limited
+                        
+            if not raw_json_str:
+                raise Exception("All Groq models failed or rate limit exceeded.")
             
             # Remove markdown backticks if Groq ignored the instruction
             if raw_json_str.startswith("```"):
@@ -1133,8 +1146,8 @@ def chat():
              
         messages = data["messages"]
         
-        # Using Llama 3.3 70B Versatile via Groq
-        chat_model_name = "llama-3.3-70b-versatile"
+        # Using Llama models via Groq with fallback
+        chat_model_names = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "llama3-8b-8192"]
         
         groq_messages = []
         # Inject system prompt into history
@@ -1149,25 +1162,32 @@ def chat():
         last_error = ""
 
         try:
-            print(f"[Chatbot] Trying Groq AI Model: {chat_model_name}...")
             client = Groq(api_key=GROQ_API_KEY)
-            
-            completion = client.chat.completions.create(
-                model=chat_model_name,
-                messages=groq_messages,
-                temperature=0.7,
-                max_completion_tokens=1024,
-                top_p=1,
-                stream=False,
-                stop=None,
-            )
-            
-            reply_text = completion.choices[0].message.content
-            print(f"[Chatbot] Success using {chat_model_name}!")
+            for chat_model_name in chat_model_names:
+                try:
+                    print(f"[Chatbot] Trying Groq AI Model: {chat_model_name}...")
+                    
+                    completion = client.chat.completions.create(
+                        model=chat_model_name,
+                        messages=groq_messages,
+                        temperature=0.7,
+                        max_completion_tokens=1024,
+                        top_p=1,
+                        stream=False,
+                        stop=None,
+                    )
+                    
+                    reply_text = completion.choices[0].message.content
+                    print(f"[Chatbot] Success using {chat_model_name}!")
+                    break
+                except Exception as e:
+                    error_str = str(e)
+                    print(f"[Chatbot] Model {chat_model_name} failed: {error_str}")
+                    last_error = error_str
+                    if "429" in error_str or "rate limit" in error_str.lower() or "limit" in error_str.lower():
+                        break
         except Exception as e:
-            error_str = str(e)
-            print(f"[Chatbot] Model {chat_model_name} failed: {error_str}")
-            last_error = error_str
+            last_error = str(e)
         
         if reply_text is not None:
             return jsonify({
