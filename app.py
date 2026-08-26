@@ -453,7 +453,7 @@ Return exactly this JSON schema:
 
         try:
             groq_client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
-            models_to_try = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "llama3-8b-8192"]
+            models_to_try = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "mixtral-8x7b-32768", "gemma2-9b-it"]
             raw_json_str = None
             
             for model_name in models_to_try:
@@ -1147,7 +1147,7 @@ def chat():
         messages = data["messages"]
         
         # Using Llama models via Groq with fallback
-        chat_model_names = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "llama3-8b-8192"]
+        chat_model_names = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "mixtral-8x7b-32768", "gemma2-9b-it"]
         
         groq_messages = []
         # Inject system prompt into history
