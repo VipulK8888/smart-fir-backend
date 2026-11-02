@@ -389,6 +389,36 @@ def login():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 # ==================================================
+# 🔑 UPDATE / CHANGE PASSWORD (FOR EXISTING USERS)
+# ==================================================
+@app.route('/update_password', methods=['POST'])
+def update_password():
+    try:
+        data = request.get_json()
+        if not data or not all(k in data for k in ("email", "old_password", "new_password")):
+            return jsonify({"status": "error", "message": "Missing email, old password, or new password"}), 400
+
+        email = data.get("email", "").strip().lower()
+        old_password = data.get("old_password")
+        new_password = data.get("new_password")
+
+        if not new_password or len(new_password) < 4:
+            return jsonify({"status": "error", "message": "New password must be at least 4 characters long"}), 400
+
+        user = users_col.find_one({"email": email, "password": old_password})
+        if not user:
+            return jsonify({"status": "error", "message": "Incorrect current password"}), 401
+
+        users_col.update_one({"email": email}, {"$set": {"password": new_password}})
+
+        return jsonify({
+            "status": "success",
+            "message": "Password updated successfully"
+        })
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+# ==================================================
 # 👮 CREATE ADMIN (RUN ONCE)
 # ==================================================
 @app.route('/create_admin')
