@@ -502,6 +502,32 @@ def set_google_password():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 # ==================================================
+# 📸 UPLOAD PROFILE IMAGE
+# ==================================================
+@app.route('/upload_profile_image', methods=['POST'])
+@cross_origin()
+def upload_profile_image():
+    try:
+        data = request.get_json()
+        if not data or "email" not in data or "image" not in data:
+            return jsonify({"status": "error", "message": "Missing email or image data"}), 400
+
+        email = data.get("email", "").strip().lower()
+        image_data = data.get("image", "")
+
+        users_col.update_one(
+            {"email": email},
+            {"$set": {"profile_image": image_data}}
+        )
+
+        return jsonify({
+            "status": "success",
+            "message": "Profile image uploaded successfully"
+        })
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+# ==================================================
 # 👮 CREATE ADMIN (RUN ONCE)
 # ==================================================
 @app.route('/create_admin')
