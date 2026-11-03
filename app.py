@@ -547,6 +547,10 @@ def update_security_settings():
         email = data.get("email", "").strip().lower()
         settings = data.get("security_settings", {})
 
+        # If face lock is disabled, clear face biometric template from database
+        if not settings.get("face_lock_enabled"):
+            settings["face_template"] = None
+
         users_col.update_one(
             {"email": email},
             {"$set": {
