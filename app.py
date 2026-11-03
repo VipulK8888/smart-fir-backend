@@ -419,6 +419,89 @@ def update_password():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 # ==================================================
+# 🌐 GOOGLE AUTHENTICATION
+# ==================================================
+@app.route('/google_auth', methods=['POST'])
+def google_auth():
+    try:
+        data = request.get_json()
+        if not data or "email" not in data:
+            return jsonify({"status": "error", "message": "Missing email"}), 400
+
+        email = data.get("email", "").strip().lower()
+        name = data.get("name", "").strip() or email.split("@")[0].capitalize()
+        google_id = data.get("google_id", "")
+        photo_url = data.get("photo_url", "")
+
+        existing_user = users_col.find_one({"email": email})
+
+        if existing_user:
+            has_password = bool(existing_user.get("password") and len(str(existing_user.get("password", "")).strip()) >= 4)
+            return jsonify({
+                "status": "success",
+                "is_new_user": False,
+                "has_password": has_password,
+                "name": existing_user.get("name", name),
+                "email": existing_user["email"],
+                "role": existing_user.get("role", "user"),
+                "auth_provider": existing_user.get("auth_provider", "google")
+            })
+        else:
+            new_user = {
+                "name": name,
+                "email": email,
+                "google_id": google_id,
+                "photo_url": photo_url,
+                "auth_provider": "google",
+                "password": "",
+                "role": "user",
+                "created_at": datetime.now().isoformat()
+            }
+            users_col.insert_one(new_user)
+
+            return jsonify({
+                "status": "success",
+                "is_new_user": True,
+                "has_password": False,
+                "name": name,
+                "email": email,
+                "role": "user",
+                "auth_provider": "google",
+                "message": "User registered via Google. Password setup required."
+            })
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+# ==================================================
+# 🔑 SET GOOGLE ACCOUNT PASSWORD
+# ==================================================
+@app.route('/set_google_password', methods=['POST'])
+def set_google_password():
+    try:
+        data = request.get_json()
+        if not data or not all(k in data for k in ("email", "password")):
+            return jsonify({"status": "error", "message": "Missing email or password"}), 400
+
+        email = data.get("email", "").strip().lower()
+        password = str(data.get("password", "")).strip()
+
+        if not password or len(password) < 4:
+            return jsonify({"status": "error", "message": "Password must be at least 4 characters long"}), 400
+
+        existing_user = users_col.find_one({"email": email})
+        if not existing_user:
+            return jsonify({"status": "error", "message": "User not found"}), 404
+
+        users_col.update_one({"email": email}, {"$set": {"password": password}})
+
+        return jsonify({
+            "status": "success",
+            "message": "Password set successfully"
+        })
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+# ==================================================
 # 👮 CREATE ADMIN (RUN ONCE)
 # ==================================================
 @app.route('/create_admin')
