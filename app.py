@@ -29,26 +29,32 @@ from groq import Groq
 
 # Google Generative AI has been removed entirely; Groq will handle the chatbot.
 
-SYSTEM_PROMPT = """You are an official Indian Police Assistant helping a user draft an FIR.
-Your goal is to gather the following details one by one from the user in a natural conversation:
-1. Complainant Name & Father's/Husband's Name
-2. Complainant Age/DOB, Occupation, and Address
-3. Contact Number / Email
-4. Exact Date, Time, and Day of the Incident
-5. Exact Location/Address of the Incident (Direction/Distance from Police Station if known)
-6. Suspect/Accused Details (Name, appearance, vehicle, etc.)
-7. Details of any Stolen or Involved Properties (and total value)
-8. Reasons for delay in reporting (if any)
-9. The full Incident Narrative (what happened)
+SYSTEM_PROMPT = """You are an official Indian Police Assistant helping a citizen draft a First Information Report (FIR) under Section 173 of the Bharatiya Nagarik Suraksha Sanhita (B.N.S.S., 2023) using the Bharatiya Nyaya Sanhita (BNS, 2023).
 
-Rules:
-- Be empathetic and professional.
-- Ask only one or two questions at a time. Do not overwhelm the user.
-- STRICT GUARDRAIL: You are exclusively a legal reporting assistant. You MUST actively decline requests to write code, solve math problems, write essays, or engage in casual chat that is unrelated to incident reporting. Politely guide the user back to the FIR process.
-- CRITICAL: Automatically detect the language the user is speaking in, and ALWAYS reply in that exact same language.
-- CRITICAL: Prefix EVERY single message you generate with the exact BCP-47 language code in square brackets for the language you are speaking (e.g. [en-IN], [hi-IN], [mr-IN], [bn-IN], [ta-IN], [te-IN], [gu-IN], [kn-IN], [ur-IN]). Example: '[hi-IN] नमस्ते! मैं...' or '[en-IN] Hello! I am...'.
-- If the user doesn't know something (like the respondent's name), tell them it's okay and proceed.
-- Once you have gathered sufficient information to write a complete FIR, output a final message starting exactly with '[FIR_COMPLETE]' followed immediately by '[en-IN]' (or whichever language) and then a detailed narrative in that language containing all the information collected. The narrative MUST EVENTUALLY BE ONLY A SIMPLE PARAGRAPH OR SET OF PARAGRAPHS describing the incident. DO NOT write a formal letter (i.e., do not include "To, The Police Inspector," subject lines, dates at the top, or signatures at the bottom). Just write the storytelling paragraph(s) outlining exactly what happened. Do not append any other conversational text after the narrative. Let the narrative be the entire unadulterated payload after the '[FIR_COMPLETE]' keyword.
+LEGAL JURISDICTION & MANDATE:
+- All offences in India are governed by the Bharatiya Nyaya Sanhita (BNS, 2023), which fully replaced the Indian Penal Code (IPC).
+- FIR registration is conducted under Section 173 B.N.S.S. (replacing old Section 154 Cr.P.C.).
+
+YOUR ROLE & INVESTIGATIVE GOAL:
+You must gather the essential information required for the official 15-point Indian Police Integrated Form IF-1:
+1. Incident Details: Exactly what happened, sequence of events, modus operandi, any weapons used, any injuries sustained.
+2. Occurrence Time & Date: Exact date, approximate time, and day of the week (if user says 'yesterday' or 'last night', ask what date or time).
+3. Place of Occurrence: Exact location, landmarks, colony/street, and distance/direction from the nearest police station if known.
+4. Suspect(s) Particulars: Known identities or unknown persons, approximate age, physical description (height, build, clothing, face cover/helmet), weapons held, vehicle used (make, model, color, registration number).
+5. Stolen / Damaged Property: Itemized list (make, model, color, IMEI / serial numbers, phone numbers), and total estimated value in INR (₹).
+6. Complainant Information: Full name, Father's or Husband's name, Age or Date of Birth, Occupation, Full residential address, and Phone number.
+7. Reasons for Delay: If the incident is being reported after more than 24 hours, inquire if there was a reason (e.g. medical treatment, shock, search for documents, or "reported promptly").
+
+CONVERSATIONAL RULES:
+- Be empathetic, calm, supportive, and professional—citizens reporting crimes may be in distress.
+- SMART DYNAMIC CONVERSATION: When the user shares information that already includes several of the above points, DO NOT ask them to repeat what they just told you! Acknowledge what they shared and selectively ask for the missing details.
+- Ask only 1 or 2 focused questions at a time to prevent overwhelming the user.
+- STRICT GUARDRAIL: You are strictly and exclusively an official police FIR reporting assistant. You MUST actively decline requests to write computer code, solve math problems, write academic essays, or engage in unrelated chit-chat. Politely guide the user back to the FIR drafting process.
+- LANGUAGE ADAPTATION: Automatically detect the language the user speaks in (Hindi, English, Marathi, Bengali, Tamil, Telugu, Gujarati, Kannada, Urdu, etc.), and ALWAYS reply in that exact same language.
+- PREFIX REQUIREMENT: Prefix EVERY single message you generate with the exact BCP-47 language code in square brackets (e.g. [en-IN], [hi-IN], [mr-IN], [bn-IN], [ta-IN], [te-IN], [gu-IN], [kn-IN], [ur-IN]). Example: '[hi-IN] नमस्ते! ...' or '[en-IN] Hello! ...'.
+- If the user doesn't know a detail (like the suspect's name or exact distance from PS), reassure them that it's okay and proceed.
+- COMPLETION TRIGGER: Once you have gathered sufficient core facts (or the user indicates they don't know remaining details), conclude your turn by outputting:
+'[FIR_COMPLETE]' followed immediately by the language tag (e.g. '[FIR_COMPLETE][en-IN]' or '[FIR_COMPLETE][hi-IN]') followed by a comprehensive, detailed, chronological narrative covering all gathered facts (complainant, incident timeline, exact location, suspect actions/weapons/vehicle, stolen items & value, injuries, and prayer for action). The narrative must be pure narrative paragraphs (NO salutations like 'To, The Police Inspector', NO date/place headers, NO signatures).
 """
 
 # Load SpaCy model, download if missing
@@ -141,14 +147,29 @@ def translate():
         }), 500
 
 # ==================================================
-# 🔍 NLP DETECTION
+# 🔍 NLP DETECTION & BNS (2023) LEGAL MAPPING
 # ==================================================
 CRIME_KEYWORDS = {
-    "Theft/Burglary": ["theft", "stolen", "steal", "chori", "robbery", "snatch", "loot", "pickpocket", "burgle", "rob"],
-    "Assault/Violence": ["assault", "attack", "hit", "beat", "punch", "stab", "violence", "murder", "kill", "dead", "fight"],
-    "Cyber Crime": ["hack", "fraud", "scam", "online", "phishing", "bank", "otp"],
-    "Harassment/Sexual Offense": ["harass", "rape", "molest", "touch", "outrage", "stalk", "eve"],
-    "Kidnapping/Abduction": ["kidnap", "abduct", "missing", "ransom"]
+    "Snatching / Robbery": ["snatch", "snatched", "snatching", "robbery", "robbed", "loot", "looted", "gunpoint", "knifepoint", "dacoity"],
+    "Theft / Burglary": ["theft", "stolen", "steal", "chori", "pickpocket", "burgle", "burglary", "housebreak"],
+    "Cyber Crime / Online Fraud": ["hack", "hacked", "fraud", "scam", "online", "phishing", "bank", "otp", "upi", "cyber", "card fraud"],
+    "Assault / Grievous Hurt": ["assault", "assaulted", "attack", "attacked", "hit", "beat", "beaten", "punch", "stab", "stabbed", "violence", "fight", "injured", "fracture"],
+    "Harassment / Sexual Offense": ["harass", "harassment", "rape", "molest", "molestation", "touch", "outrage", "stalk", "stalking", "eve teasing"],
+    "Criminal Intimidation / Threats": ["threat", "threaten", "threatened", "kill you", "extort", "extortion", "blackmail", "ransom"],
+    "Rash Driving / Hit & Run": ["accident", "rash driving", "run over", "hit and run", "car hit", "bike hit", "speeding", "negligent driving"],
+    "Kidnapping / Abduction": ["kidnap", "kidnapped", "abduct", "abducted", "missing child", "ransom demand"]
+}
+
+BNS_FALLBACK_MAPPING = {
+    "Snatching / Robbery": "Section 304(1) & 309(4) BNS, 2023 (Snatching & Robbery)",
+    "Theft / Burglary": "Section 303(2) BNS, 2023 (Theft) / Section 331(4) BNS, 2023 (Lurking House-trespass)",
+    "Cyber Crime / Online Fraud": "Section 318(4) BNS, 2023 (Cheating) r/w Section 66C & 66D Information Technology Act, 2000",
+    "Assault / Grievous Hurt": "Section 115(2) & 117(2) BNS, 2023 (Voluntarily Causing Hurt / Grievous Hurt)",
+    "Harassment / Sexual Offense": "Section 74 & 75 BNS, 2023 (Assault or criminal force to woman / Sexual Harassment)",
+    "Criminal Intimidation / Threats": "Section 351(2) & 308(2) BNS, 2023 (Criminal Intimidation & Extortion)",
+    "Rash Driving / Hit & Run": "Section 281 & 106(1) BNS, 2023 (Rash Driving on Public Way & Negligent Act)",
+    "Kidnapping / Abduction": "Section 137(2) BNS, 2023 (Kidnapping)",
+    "General Complaint": "Applicable provisions of Bharatiya Nyaya Sanhita (BNS, 2023)"
 }
 
 def detect_crime_type(text):
@@ -233,7 +254,7 @@ def generate_pdf(fir_data, fir_id):
     # Header
     elements.append(Paragraph("<b>FORM – IF1 - (Integrated Form)</b>", title_style))
     elements.append(Paragraph("<b>FIRST INFORMATION REPORT</b>", title_style))
-    elements.append(Paragraph("(Under Section 154 Cr.P.C)", sub_title))
+    elements.append(Paragraph("(Under Section 173 B.N.S.S., 2023 / Formerly Section 154 Cr.P.C)", sub_title))
     
     # Extract data safely with fallbacks
     date_val = fir_data.get('date', datetime.now().strftime('%d %B %Y'))
@@ -259,7 +280,7 @@ def generate_pdf(fir_data, fir_id):
 
     # Form Lines
     elements.append(Paragraph(f"1. Dist: <b>Central</b> &nbsp;&nbsp;&nbsp;&nbsp; P.S: <b>Cyber Crime Cell</b> &nbsp;&nbsp;&nbsp;&nbsp; Year: <b>{datetime.now().year}</b> &nbsp;&nbsp;&nbsp;&nbsp; F.I.R. No: <b>{fir_id}</b> &nbsp;&nbsp;&nbsp;&nbsp; Date: <b>{date_val}</b>", body))
-    elements.append(Paragraph(f"2. Acts & Sections: <b>{acts}</b>", body))
+    elements.append(Paragraph(f"2. Acts & Sections (BNS 2023): <b>{acts}</b>", body))
     elements.append(Paragraph(f"3. (a) Occurrence of Offence: <b>{occ_date}</b>", body))
     elements.append(Paragraph(f"&nbsp;&nbsp;&nbsp;(b) Information received at P.S. Date: <b>{date_val}</b>", body))
     elements.append(Paragraph(f"&nbsp;&nbsp;&nbsp;(c) General Diary Reference: Entry No. ________ Time: ________", body))
@@ -297,7 +318,7 @@ def generate_pdf(fir_data, fir_id):
     elements.append(Paragraph(contents.replace('\n', '<br/>'), narrative_style))
 
     # Footer
-    elements.append(Paragraph(f"13. Action taken: Since the above report reveals commission of offence (s) u/s as mentioned at Item No. 2., registered the case and took up the investigation / directed ____________ Rank ____________ to take up the investigation.", body))
+    elements.append(Paragraph(f"13. Action taken: Since the above report reveals commission of offence (s) u/s as mentioned at Item No. 2., registered the case under Section 173 B.N.S.S., 2023 and took up the investigation / directed ____________ Rank ____________ to take up the investigation.", body))
     elements.append(Paragraph(f"F.I.R. read over to the complainant / Informant, admitted to be correctly recorded and a copy given to the complainant / Informant free of cost.", body))
     
     elements.append(Spacer(1, 40))
@@ -619,40 +640,71 @@ def generate_fir():
 
         # 🚀 Groq LLM Pass to formalize text into IF-1 schema
         current_time = datetime.now().strftime('%A, %d-%m-%Y %I:%M %p')
-        system_prompt = f"""You are an expert Indian Legal AI Assistant. Your job is to extract and rewrite the provided informal incident report into a strict JSON payload mapping exactly to the official Indian Police FIR Form-IF1 (Section 154 Cr.P.C).
+        system_prompt = f"""You are an elite Indian Legal AI Prosecutor and Police Station House Officer (SHO) expert specializing in the Bharatiya Nyaya Sanhita (BNS, 2023) and Bharatiya Nagarik Suraksha Sanhita (BNSS, 2023).
+Your job is to rigorously extract, analyze, and formalize the provided incident statement into a strict JSON payload mapping exactly to the official Indian Police FIR Form-IF1 under Section 173 B.N.S.S., 2023.
 
-CRITICAL INSTRUCTIONS:
-1. Return ONLY a valid JSON string. Do not wrap in markdown (e.g. ```json). Do not provide any conversational text before or after the JSON.
-2. For missing information, output 'Not Specified' or 'Unknown'.
-3. 'fir_contents' MUST be a highly formal, third-person police narrative expanding upon the user's description (e.g. 'On the day of X, the complainant approached...').
-4. The CURRENT ACTUAL DATE AND TIME IS: {current_time}. MUST mathematically calculate any relative times like "yesterday", "last night", "two hours ago" into exact DD-MM-YYYY dates for the 'occurrence_day_date_time' field! Output EXACT dates!
+CRITICAL LEGAL DIRECTIVE (BNS 2023 REPLACES IPC):
+The Indian Penal Code (IPC, 1860) and Section 154 Cr.P.C. are fully repealed and replaced by BNS 2023 and BNSS 2023. You MUST cite the exact Bharatiya Nyaya Sanhita (BNS, 2023) sections.
+Reference BNS Sections to apply accurately:
+- Theft of property/goods/vehicle: Section 303(2) BNS, 2023
+- Snatching (snatching chain, mobile, purse by sudden force): Section 304(1) & 304(2) BNS, 2023
+- Robbery (theft accompanied by violence, restraint, or threat of hurt): Section 309(4) BNS, 2023
+- Dacoity (robbery committed by 5 or more persons): Section 310(2) BNS, 2023
+- Extortion (demanding money/property under threat): Section 308(2) BNS, 2023
+- Cheating, Fraud, Financial deception: Section 318(4) BNS, 2023
+- Cyber Fraud / Online Bank Scam / Identity Theft: Section 318(4) BNS, 2023 read with Section 66C & Section 66D Information Technology Act, 2000
+- Criminal Breach of Trust: Section 316(2) BNS, 2023
+- Forgery (fraudulent documents/signatures): Section 336(3) / 338 BNS, 2023
+- Criminal Trespass / Housebreaking / Burglary: Section 329(3) / 331(4) BNS, 2023
+- Voluntarily Causing Hurt (simple injury/assault): Section 115(2) BNS, 2023
+- Grievous Hurt (fracture, severe injury, permanent disfiguration): Section 117(2) BNS, 2023
+- Wrongful Restraint / Confinement: Section 126(2) / 127(2) BNS, 2023
+- Criminal Intimidation / Threats to kill or harm: Section 351(2) or Section 351(3) BNS, 2023
+- Outraging Modesty of Woman / Sexual Harassment: Section 74 / Section 75 BNS, 2023
+- Stalking: Section 78 BNS, 2023
+- Murder: Section 103(1) BNS, 2023 | Attempt to Murder: Section 109 BNS, 2023
+- Culpable Homicide not amounting to murder: Section 105 BNS, 2023
+- Rash & Negligent Driving: Section 281 BNS, 2023
+- Causing Death by Negligence: Section 106(1) BNS, 2023
+- Hit and Run (causing death by rash/negligent driving and escaping): Section 106(2) BNS, 2023
+- Mischief / Property Damage: Section 324(4) BNS, 2023
+- Common Intention (two or more persons acting together): Section 3(5) BNS, 2023
+- Criminal Conspiracy: Section 61(2) BNS, 2023
+- Kidnapping / Abduction: Section 137(2) BNS, 2023
+
+CRITICAL EXTRACTION & FORMALIZATION RULES:
+1. Return ONLY a valid JSON string. Do not wrap in markdown (e.g. ```json). Do not provide conversational text before or after the JSON.
+2. CURRENT ACTUAL DATE AND TIME IS: {current_time}. MUST mathematically calculate any relative time expressions (e.g., 'yesterday', 'last night', '3 days ago', 'this morning at 10 AM') into exact DD-MM-YYYY dates and precise time windows for 'occurrence_day_date_time'!
+3. 'acts_and_sections': State all relevant sections with their specific titles, e.g. "Section 304(1), 309(4) BNS, 2023 r/w Section 3(5) BNS (Snatching, Robbery & Common Intention)".
+4. 'fir_contents': MUST be a comprehensive, third-person police narrative expanding upon the user's description (e.g., 'The complainant approached the Police Station and submitted a written statement to the effect that on [Date] at about [Time]...'). Detail the sequence of events, specific actions and weapons of the accused, injuries inflicted, exact items and cash stolen, reasons for delay (if any), and concluding prayer for registration of FIR under Section 173 B.N.S.S., 2023.
+5. If specific complainant or suspect details are not in the prompt, write appropriate formal entries ('Citizen Informant', 'Unknown person aged approx 25-30 years', 'Approx 2 km North from PS', 'Reported promptly without delay').
 
 Return exactly this JSON schema:
 {{
-  "acts_and_sections": "(Predict relevant Indian Penal Code or BNS sections based on crime type described)",
-  "occurrence_day_date_time": "(Extract or 'Not Specified')",
-  "place_of_occurrence_direction_distance": "(Extract or 'Not Specified')",
-  "place_of_occurrence_address": "(Extract or 'Not Specified')",
-  "complainant_name": "(Extract or 'Unknown')",
-  "complainant_father_husband_name": "(Extract or 'Not Specified')",
-  "complainant_dob_year": "(Extract or 'Not Specified')",
+  "acts_and_sections": "(Exact BNS 2023 sections and acts)",
+  "occurrence_day_date_time": "(Exact calculated DD-MM-YYYY, Day, and Time window)",
+  "place_of_occurrence_direction_distance": "(Direction and distance from Police Station, e.g. 'Approx 2.0 km North-East from PS')",
+  "place_of_occurrence_address": "(Full detailed location / landmark)",
+  "complainant_name": "(Full Name or 'Citizen Informant')",
+  "complainant_father_husband_name": "(Father / Husband / Guardian Name or 'Not Specified')",
+  "complainant_dob_year": "(DOB or Age in years, e.g. '30 Years')",
   "complainant_nationality": "Indian",
-  "complainant_passport": "(Extract or 'Not Specified')",
-  "complainant_occupation": "(Extract or 'Not Specified')",
-  "complainant_address": "(Extract or 'Not Specified')",
-  "suspect_details": "(Extract or 'Unknown')",
-  "reasons_for_delay": "(Extract or 'None stated')",
-  "stolen_properties": "(Extract detailed list or 'None')",
-  "total_value_stolen": "(Extract or 'N/A')",
-  "inquest_report_ud_case": "(Extract or 'None')",
-  "fir_contents": "(The highly formalized, professional legal incident narrative rewritten in third-person)",
-  "crime_type": "(Very short 2-3 word category of crime, e.g. 'Theft of Vehicle')"
+  "complainant_passport": "(Passport No or 'Not Specified')",
+  "complainant_occupation": "(Occupation or 'Not Specified')",
+  "complainant_address": "(Full residential address or 'Not Specified')",
+  "suspect_details": "(Suspect description, weapons, vehicle info, or 'Unknown persons')",
+  "reasons_for_delay": "(Reason for delay or 'Reported promptly without delay')",
+  "stolen_properties": "(Itemized list of stolen/involved properties or 'None')",
+  "total_value_stolen": "(Estimated amount in ₹ or 'N/A')",
+  "inquest_report_ud_case": "(Inquest/UD case reference or 'Not Applicable')",
+  "fir_contents": "(Comprehensive, highly formal 3rd-person legal FIR narrative)",
+  "crime_type": "(Crisp category e.g. 'Snatching & Robbery (BNS Sec 304/309)')"
 }}
 """
 
         try:
             groq_client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
-            models_to_try = ["openai/gpt-oss-20b", "qwen/qwen3.6-27b", "llama-3.3-70b-versatile"]
+            models_to_try = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "openai/gpt-oss-20b", "qwen/qwen3.6-27b"]
             raw_json_str = None
             
             for model_name in models_to_try:
@@ -689,23 +741,24 @@ Return exactly this JSON schema:
             # Fallback to older basic extraction
             crime = detect_crime_type(english_text)
             entities = extract_entities(english_text)
+            bns_act = BNS_FALLBACK_MAPPING.get(crime, "Applicable provisions of Bharatiya Nyaya Sanhita (BNS, 2023)")
             fir_form_data = {
-                "acts_and_sections": "Relevant sections to be added",
-                "occurrence_day_date_time": "Unknown",
-                "place_of_occurrence_direction_distance": "Unknown",
-                "place_of_occurrence_address": entities.get("address", "Unknown"),
-                "complainant_name": entities.get("name", "Unknown"),
-                "complainant_father_husband_name": "Unknown",
-                "complainant_dob_year": entities.get("age", "Unknown"),
+                "acts_and_sections": bns_act,
+                "occurrence_day_date_time": "Date & Time under verification",
+                "place_of_occurrence_direction_distance": "Local Jurisdiction",
+                "place_of_occurrence_address": entities.get("address", "Unknown Location"),
+                "complainant_name": entities.get("name", "Citizen Informant"),
+                "complainant_father_husband_name": "Not Specified",
+                "complainant_dob_year": entities.get("age", "Not Specified"),
                 "complainant_nationality": "Indian",
-                "complainant_passport": "Unknown",
-                "complainant_occupation": "Unknown",
-                "complainant_address": "Unknown",
-                "suspect_details": entities.get("respondent", "Unknown"),
-                "reasons_for_delay": "None stated",
-                "stolen_properties": "None",
+                "complainant_passport": "Not Specified",
+                "complainant_occupation": "Not Specified",
+                "complainant_address": "Not Specified",
+                "suspect_details": entities.get("respondent", "Unknown Persons"),
+                "reasons_for_delay": "Reported promptly without delay",
+                "stolen_properties": "Under Investigation",
                 "total_value_stolen": "N/A",
-                "inquest_report_ud_case": "None",
+                "inquest_report_ud_case": "Not Applicable",
                 "fir_contents": english_text,
                 "crime_type": crime
             }
@@ -716,9 +769,9 @@ Return exactly this JSON schema:
 
         # Create a nice plaintext digest for the Flutter app preview screen
         fir_text_preview = f"""**Form - IF1 (Integrated Form) Preview**
-*Under Section 154 Cr.P.C*
+*Under Section 173 B.N.S.S., 2023 (Formerly Section 154 Cr.P.C)*
 
-**Acts & Sections:** {fir_form_data.get('acts_and_sections')}
+**Acts & Sections (BNS 2023):** {fir_form_data.get('acts_and_sections')}
 **Occurrence:** {fir_form_data.get('occurrence_day_date_time')}
 **Place:** {fir_form_data.get('place_of_occurrence_address')}
 
@@ -1345,8 +1398,8 @@ def chat():
              
         messages = data["messages"]
         
-        # Using Llama models via Groq with fallback
-        chat_model_names = ["openai/gpt-oss-20b", "qwen/qwen3.6-27b", "llama-3.3-70b-versatile"]
+        # Using high performance Groq models with robust fallbacks
+        chat_model_names = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "openai/gpt-oss-20b", "qwen/qwen3.6-27b"]
         
         groq_messages = []
         # Inject system prompt into history
