@@ -378,7 +378,10 @@ def login():
                 "status": "success",
                 "name": user["name"],
                 "email": user["email"],
-                "role": user.get("role", "user")
+                "role": user.get("role", "user"),
+                "security_setup_done": bool(user.get("security_setup_done")),
+                "security_settings": user.get("security_settings", {}),
+                "profile_image": user.get("profile_image", "")
             })
         else:
             return jsonify({
@@ -444,7 +447,10 @@ def google_auth():
                 "name": existing_user.get("name", name),
                 "email": existing_user["email"],
                 "role": existing_user.get("role", "user"),
-                "auth_provider": existing_user.get("auth_provider", "google")
+                "auth_provider": existing_user.get("auth_provider", "google"),
+                "security_setup_done": bool(existing_user.get("security_setup_done")),
+                "security_settings": existing_user.get("security_settings", {}),
+                "profile_image": existing_user.get("profile_image", photo_url)
             })
         else:
             new_user = {
@@ -455,6 +461,8 @@ def google_auth():
                 "auth_provider": "google",
                 "password": "",
                 "role": "user",
+                "security_setup_done": False,
+                "security_settings": {},
                 "created_at": datetime.now().isoformat()
             }
             users_col.insert_one(new_user)
@@ -467,6 +475,8 @@ def google_auth():
                 "email": email,
                 "role": "user",
                 "auth_provider": "google",
+                "security_setup_done": False,
+                "security_settings": {},
                 "message": "User registered via Google. Password setup required."
             })
     except Exception as e:
@@ -476,6 +486,7 @@ def google_auth():
 # 🔑 SET GOOGLE ACCOUNT PASSWORD
 # ==================================================
 @app.route('/set_google_password', methods=['POST'])
+@cross_origin()
 def set_google_password():
     try:
         data = request.get_json()
@@ -497,6 +508,54 @@ def set_google_password():
         return jsonify({
             "status": "success",
             "message": "Password set successfully"
+        })
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+# ==================================================
+# 🔐 UPDATE USER SECURITY SETTINGS (PERSIST IN DB)
+# ==================================================
+@app.route('/update_security_settings', methods=['POST'])
+@cross_origin()
+def update_security_settings():
+    try:
+        data = request.get_json()
+        if not data or "email" not in data:
+            return jsonify({"status": "error", "message": "Missing email"}), 400
+
+        email = data.get("email", "").strip().lower()
+        settings = data.get("security_settings", {})
+
+        users_col.update_one(
+            {"email": email},
+            {"$set": {
+                "security_settings": settings,
+                "security_setup_done": True,
+                "updated_at": datetime.now().isoformat()
+            }}
+        )
+
+        return jsonify({
+            "status": "success",
+            "message": "Security settings saved to database"
+        })
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.route('/get_security_settings/<email>', methods=['GET'])
+@cross_origin()
+def get_security_settings(email):
+    try:
+        email = email.strip().lower()
+        user = users_col.find_one({"email": email})
+        if not user:
+            return jsonify({"status": "error", "message": "User not found"}), 404
+
+        return jsonify({
+            "status": "success",
+            "has_password": bool(user.get("password")),
+            "security_setup_done": bool(user.get("security_setup_done")),
+            "security_settings": user.get("security_settings", {})
         })
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
