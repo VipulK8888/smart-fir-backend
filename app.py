@@ -879,15 +879,21 @@ def update_fir_status():
         fir_id = data["fir_id"]
         status = data["status"] # 'Approved' or 'Rejected'
         
+        update_doc = {"status": status}
+        if "remarks" in data and data["remarks"]:
+            update_doc["admin_remarks"] = data["remarks"]
+        if "officer" in data and data["officer"]:
+            update_doc["investigating_officer"] = data["officer"]
+        
         result = firs_col.update_one(
             {"fir_id": fir_id},
-            {"$set": {"status": status}}
+            {"$set": update_doc}
         )
         
-        if result.modified_count > 0:
+        if result.modified_count > 0 or result.matched_count > 0:
             return jsonify({"status": "success", "message": f"FIR marked as {status}"})
         else:
-            return jsonify({"status": "error", "message": "FIR not found or status already matches"}), 404
+            return jsonify({"status": "error", "message": "FIR not found"}), 404
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
@@ -899,6 +905,64 @@ def get_all_firs():
     try:
         firs = list(firs_col.find({}, {"_id": 0}).sort("_id", -1)) # Add sort by newest
         return jsonify(firs)
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+# ==================================================
+# 👮 ADMIN → AGGREGATED METRICS & STATS
+# ==================================================
+@app.route('/admin/stats')
+def admin_stats():
+    try:
+        total = firs_col.count_documents({})
+        pending = firs_col.count_documents({"status": {"$in": ["Pending", "pending", None]}})
+        approved = firs_col.count_documents({"status": {"$in": ["Approved", "approved"]}})
+        rejected = firs_col.count_documents({"status": {"$in": ["Rejected", "rejected"]}})
+        users_count = users_col.count_documents({"role": {"$ne": "admin"}})
+        
+        # Crime type counts
+        pipeline = [
+            {"$group": {"_id": "$crime_type", "count": {"$sum": 1}}},
+            {"$sort": {"count": -1}}
+        ]
+        crime_types = list(firs_col.aggregate(pipeline))
+        
+        return jsonify({
+            "status": "success",
+            "total_firs": total,
+            "pending_firs": pending,
+            "approved_firs": approved,
+            "rejected_firs": rejected,
+            "total_citizens": users_count,
+            "crime_types": [{"type": c.get("_id") or "Uncategorized", "count": c.get("count", 0)} for c in crime_types]
+        })
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+# ==================================================
+# 👮 ADMIN → REGISTERED CITIZENS DIRECTORY
+# ==================================================
+@app.route('/admin/users')
+def admin_users():
+    try:
+        users = list(users_col.find(
+            {"role": {"$ne": "admin"}},
+            {"_id": 0, "password": 0}
+        ).sort("_id", -1))
+        return jsonify(users)
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+# ==================================================
+# 👮 ADMIN → DELETE / DISCARD FIR
+# ==================================================
+@app.route('/admin/delete_fir/<fir_id>', methods=['POST', 'DELETE'])
+def admin_delete_fir(fir_id):
+    try:
+        result = firs_col.delete_one({"fir_id": fir_id})
+        if result.deleted_count > 0:
+            return jsonify({"status": "success", "message": f"FIR {fir_id} deleted successfully"})
+        return jsonify({"status": "error", "message": "FIR not found"}), 404
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
