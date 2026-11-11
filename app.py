@@ -1,4 +1,5 @@
 import os
+import uuid
 import re
 import threading
 from datetime import datetime
@@ -102,6 +103,7 @@ try:
     db = client["fir_database"]
     users_col = db["users"]
     firs_col = db["confirmed_firs"]
+    ai_chats_col = db["ai_chats"]
     fs = gridfs.GridFS(db)
     print("Successfully connected to MongoDB and GridFS.")
 except Exception as e:
@@ -547,9 +549,6 @@ def update_security_settings():
         email = data.get("email", "").strip().lower()
         settings = data.get("security_settings", {})
 
-        # If face lock is disabled, clear face biometric template from database
-        if not settings.get("face_lock_enabled"):
-            settings["face_template"] = None
 
         users_col.update_one(
             {"email": email},
@@ -1451,8 +1450,78 @@ def serve_pdf(filename):
     except Exception as e:
         return jsonify({"status": "error", "message": f"Server Error: {str(e)}"}), 500
 # ==================================================
-# 🤖 CHATBOT API (GROQ LLAMA-3 GUIDED FIR)
+# 🤖 CHATBOT API (GROQ LLAMA-3 GUIDED FIR WITH PERSISTENT SESSIONS)
 # ==================================================
+@app.route('/chat/sessions/<email>', methods=['GET'])
+def get_chat_sessions(email):
+    try:
+        clean_email = email.strip().lower()
+        sessions = list(ai_chats_col.find(
+            {"user_email": clean_email},
+            {"_id": 0, "chat_id": 1, "title": 1, "updated_at": 1, "created_at": 1, "messages": {"$slice": -1}}
+        ).sort("updated_at", -1))
+        
+        results = []
+        for s in sessions:
+            last_msg = ""
+            if s.get("messages") and len(s["messages"]) > 0:
+                last_msg = s["messages"][-1].get("text", "")
+            
+            up_at = s.get("updated_at")
+            cr_at = s.get("created_at")
+            results.append({
+                "chat_id": s.get("chat_id"),
+                "title": s.get("title") or "FIR Consultation",
+                "last_message": last_msg[:90],
+                "updated_at": up_at.isoformat() if hasattr(up_at, "isoformat") else str(up_at or ""),
+                "created_at": cr_at.isoformat() if hasattr(cr_at, "isoformat") else str(cr_at or ""),
+            })
+        return jsonify({"status": "success", "sessions": results})
+    except Exception as e:
+        return jsonify({"status": "error", "message": f"Failed to fetch chat sessions: {str(e)}"}), 500
+
+@app.route('/chat/session/<chat_id>', methods=['GET'])
+def get_chat_session(chat_id):
+    try:
+        session = ai_chats_col.find_one({"chat_id": chat_id}, {"_id": 0})
+        if not session:
+            return jsonify({"status": "error", "message": "Chat session not found"}), 404
+        
+        if hasattr(session.get("updated_at"), "isoformat"):
+            session["updated_at"] = session["updated_at"].isoformat()
+        if hasattr(session.get("created_at"), "isoformat"):
+            session["created_at"] = session["created_at"].isoformat()
+            
+        return jsonify({"status": "success", "session": session})
+    except Exception as e:
+        return jsonify({"status": "error", "message": f"Failed to fetch session: {str(e)}"}), 500
+
+@app.route('/chat/session/<chat_id>', methods=['DELETE', 'POST'])
+def delete_chat_session(chat_id):
+    try:
+        res = ai_chats_col.delete_one({"chat_id": chat_id})
+        if res.deleted_count > 0:
+            return jsonify({"status": "success", "message": "Chat session deleted successfully"})
+        return jsonify({"status": "error", "message": "Chat session not found"}), 404
+    except Exception as e:
+        return jsonify({"status": "error", "message": f"Failed to delete session: {str(e)}"}), 500
+
+@app.route('/chat/session/<chat_id>/rename', methods=['POST'])
+def rename_chat_session(chat_id):
+    try:
+        data = request.get_json() or {}
+        new_title = (data.get("title") or "").strip()
+        if not new_title:
+            return jsonify({"status": "error", "message": "Title cannot be empty"}), 400
+        
+        ai_chats_col.update_one(
+            {"chat_id": chat_id},
+            {"$set": {"title": new_title, "updated_at": datetime.utcnow()}}
+        )
+        return jsonify({"status": "success", "title": new_title})
+    except Exception as e:
+        return jsonify({"status": "error", "message": f"Failed to rename session: {str(e)}"}), 500
+
 @app.route('/chat', methods=['POST'])
 def chat():
     try:
@@ -1465,6 +1534,9 @@ def chat():
              return jsonify({"status": "error", "message": "Backend is missing GROQ_API_KEY environment variable. Chatbot is offline."}), 500
              
         messages = data["messages"]
+        user_email = (data.get("user_email") or "").strip().lower()
+        chat_id = data.get("chat_id")
+        custom_title = data.get("title")
         
         # Using high performance Groq models with robust fallbacks
         chat_model_names = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "openai/gpt-oss-20b", "qwen/qwen3.6-27b"]
@@ -1510,9 +1582,77 @@ def chat():
             last_error = str(e)
         
         if reply_text is not None:
+            active_chat_id = chat_id
+            active_title = custom_title
+            
+            if user_email:
+                now = datetime.utcnow()
+                existing_doc = ai_chats_col.find_one({"chat_id": active_chat_id}) if active_chat_id else None
+                
+                if not existing_doc:
+                    active_chat_id = str(uuid.uuid4())
+                    if not active_title:
+                        first_user_text = ""
+                        for m in messages:
+                            if m.get("role") == "user" and m.get("text"):
+                                first_user_text = m.get("text", "").strip()
+                                break
+                        if first_user_text:
+                            clean_t = re.sub(r'\[.*?\]', '', first_user_text).strip()
+                            active_title = clean_t[:36].strip() + ("..." if len(clean_t) > 36 else "")
+                        else:
+                            active_title = "FIR Consultation"
+                            
+                    formatted_msgs = []
+                    for m in messages:
+                        formatted_msgs.append({
+                            "role": m.get("role", "user"),
+                            "text": m.get("text", ""),
+                            "timestamp": m.get("timestamp") or now.isoformat()
+                        })
+                    formatted_msgs.append({
+                        "role": "model",
+                        "text": reply_text,
+                        "timestamp": now.isoformat()
+                    })
+                    
+                    ai_chats_col.insert_one({
+                        "chat_id": active_chat_id,
+                        "user_email": user_email,
+                        "title": active_title,
+                        "messages": formatted_msgs,
+                        "created_at": now,
+                        "updated_at": now
+                    })
+                else:
+                    active_title = existing_doc.get("title") or active_title or "FIR Consultation"
+                    last_user_msg = messages[-1] if messages else {"role": "user", "text": ""}
+                    
+                    new_msgs = [
+                        {
+                            "role": "user",
+                            "text": last_user_msg.get("text", ""),
+                            "timestamp": last_user_msg.get("timestamp") or now.isoformat()
+                        },
+                        {
+                            "role": "model",
+                            "text": reply_text,
+                            "timestamp": now.isoformat()
+                        }
+                    ]
+                    ai_chats_col.update_one(
+                        {"chat_id": active_chat_id},
+                        {
+                            "$push": {"messages": {"$each": new_msgs}},
+                            "$set": {"updated_at": now}
+                        }
+                    )
+
             return jsonify({
                 "status": "success",
-                "reply": reply_text
+                "reply": reply_text,
+                "chat_id": active_chat_id,
+                "title": active_title
             })
         else:
             if "429" in last_error or "rate limit" in last_error.lower() or "limit" in last_error.lower():
